@@ -1,11 +1,10 @@
 local a={
-  f1: 'val1',
   _schema:: {
-    f3: [true],
-    f2: 'testVal'+'1'
+    f2: 'testVal'
   }
 };
+local b=[a.f2];
 
 {
-  test2: a.f3
+  test2: b
 }

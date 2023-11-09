@@ -714,6 +714,9 @@ func (i *interpreter) manifestJSON(v value) (interface{}, error) {
 				loc: &msg,
 			})
 			elVal, err := i.evaluatePV(th)
+			if i.isDeferred(elVal) {
+				v.isDeferred = true
+			}
 			if err != nil {
 				i.stack.clearCurrentTrace()
 				return nil, err
