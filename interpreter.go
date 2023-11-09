@@ -19,6 +19,7 @@ package jsonnet
 import (
 	"bytes"
 	"fmt"
+	"github.com/fatih/color"
 	"io"
 	"math"
 	"reflect"
@@ -652,8 +653,22 @@ func unparseNumber(v float64) string {
 	return fmt.Sprintf("%.17g", v)
 }
 
+const (
+	InfoColor    = "\033[1;34m%s\033[0m"
+	NoticeColor  = "\033[1;36m%s\033[0m"
+	WarningColor = "\033[1;33m%s\033[0m"
+	ErrorColor   = "\033[1;31m%s\033[0m"
+	DebugColor   = "\033[0;36m%s\033[0m"
+)
+
+var red = color.New(color.FgRed).SprintFunc()
+
+func deferredColor(str string) string {
+	return fmt.Sprintf(red(str))
+}
+
 // manifestJSON converts to standard JSON representation as in "encoding/json" package
-func (i *interpreter) manifestJSON(v value) (interface{}, error) {
+func (i *interpreter) manifestJSON(v value) (*manifested, error) {
 	// TODO(sbarzowski) Add nice stack traces indicating the part of the code which
 	// evaluates to non-manifestable value (that might require passing context about
 	// the root value)
@@ -672,42 +687,35 @@ func (i *interpreter) manifestJSON(v value) (interface{}, error) {
 	switch v := v.(type) {
 
 	case *valueBoolean:
-		if v.isDeferred {
-			return fmt.Sprintf("<%t>", v.value), nil
-		}
-		return v.value, nil
+		return &manifested{isDeferred: v.isDeferred, value: v.value}, nil
 
 	case *valueFunction:
 		return nil, makeRuntimeError("couldn't manifest function as JSON", i.getCurrentStackTrace())
 
 	case *valueNumber:
-		if v.isDeferred {
-			return fmt.Sprintf("<%s>", strconv.FormatFloat(v.value, 'f', -1, 64)), nil
-		}
-		return v.value, nil
+		return &manifested{isDeferred: v.isDeferred, value: v.value}, nil
 
 	case valueString:
-		if i.isDeferred(v) {
-			return fmt.Sprintf("<%s>", v.getGoString()), nil
-		}
-		return v.getGoString(), nil
+		return &manifested{isDeferred: i.isDeferred(v), value: v.getGoString()}, nil
 
 	case *valueNull:
+		return &manifested{isDeferred: i.isDeferred(v), isNull: true}, nil
 		return nil, nil
 
 	case *valueArray:
 		result := make([]interface{}, 0, len(v.elements))
-		if v.isDeferred && len(v.elements) == 0 {
-			msg := ast.MakeLocationRangeMessage("Array element deferred")
-			i.stack.setCurrentTrace(traceElement{
-				loc: &msg,
-			})
+		/*
+			if v.isDeferred && len(v.elements) == 0 {
+				msg := ast.MakeLocationRangeMessage("Array element deferred")
+				i.stack.setCurrentTrace(traceElement{
+					loc: &msg,
+				})
 
-			d, _ := i.manifestJSON(makeValueString("<deferred>", true))
-			result = append(result, d)
-			i.stack.clearCurrentTrace()
-		}
-
+				d, _ := i.manifestJSON(makeValueString("<deferred>", true))
+				result = append(result, d)
+				i.stack.clearCurrentTrace()
+			}
+		*/
 		for index, th := range v.elements {
 			msg := ast.MakeLocationRangeMessage(fmt.Sprintf("Array element %d", index))
 			i.stack.setCurrentTrace(traceElement{
@@ -729,7 +737,7 @@ func (i *interpreter) manifestJSON(v value) (interface{}, error) {
 			result = append(result, elem)
 			i.stack.clearCurrentTrace()
 		}
-		return result, nil
+		return &manifested{isDeferred: v.isDeferred, value: result}, nil
 
 	case *valueObject:
 		fieldNames := objectFields(v, withoutHidden)
@@ -771,11 +779,8 @@ func (i *interpreter) manifestJSON(v value) (interface{}, error) {
 				v.isDeferred = true
 			}
 		}
-		if v.isDeferred {
-			result["isDeferred"] = true
-		}
 
-		return result, nil
+		return &manifested{isDeferred: v.isDeferred, value: result}, nil
 
 	default:
 		return nil, makeRuntimeError(
@@ -786,14 +791,28 @@ func (i *interpreter) manifestJSON(v value) (interface{}, error) {
 	}
 }
 
-func serializeJSON(v interface{}, multiline bool, indent string, buf *bytes.Buffer) {
-	switch v := v.(type) {
-	case nil:
-		buf.WriteString("null")
+type manifested struct {
+	isDeferred bool
+	value      interface{}
+	isNull     bool
+}
 
+func serializeJSON(v *manifested, multiline bool, indent string, buf *bytes.Buffer) {
+	if v.isNull {
+		if v.isDeferred {
+			buf.WriteString(deferredColor("null"))
+		} else {
+			buf.WriteString("null")
+		}
+	}
+	switch vv := v.value.(type) {
 	case []interface{}:
-		if len(v) == 0 {
-			buf.WriteString("[ ]")
+		if len(vv) == 0 {
+			if v.isDeferred {
+				buf.WriteString(deferredColor("[ ]"))
+			} else {
+				buf.WriteString("[ ]")
+			}
 		} else {
 			var prefix string
 			var indent2 string
@@ -804,10 +823,13 @@ func serializeJSON(v interface{}, multiline bool, indent string, buf *bytes.Buff
 				prefix = "["
 				indent2 = indent
 			}
-			for _, elem := range v {
+			if v.isDeferred {
+				prefix = deferredColor(prefix)
+			}
+			for _, elem := range vv {
 				buf.WriteString(prefix)
 				buf.WriteString(indent2)
-				serializeJSON(elem, multiline, indent2, buf)
+				serializeJSON(elem.(*manifested), multiline, indent2, buf)
 				if multiline {
 					prefix = ",\n"
 				} else {
@@ -818,28 +840,45 @@ func serializeJSON(v interface{}, multiline bool, indent string, buf *bytes.Buff
 				buf.WriteString("\n")
 			}
 			buf.WriteString(indent)
-			buf.WriteString("]")
+			if v.isDeferred {
+				buf.WriteString(deferredColor("]"))
+			} else {
+				buf.WriteString("]")
+			}
 		}
 
 	case bool:
-		if v {
-			buf.WriteString("true")
+		var val string
+		if vv {
+			val = "true"
 		} else {
-			buf.WriteString("false")
+			val = "false"
 		}
+		if v.isDeferred {
+			val = deferredColor(val)
+		}
+		buf.WriteString(val)
 
 	case float64:
-		buf.WriteString(unparseNumber(v))
+		val := unparseNumber(vv)
+		if v.isDeferred {
+			val = deferredColor(val)
+		}
+		buf.WriteString(val)
 
 	case map[string]interface{}:
-		fieldNames := make([]string, 0, len(v))
-		for name := range v {
+		fieldNames := make([]string, 0, len(vv))
+		for name := range vv {
 			fieldNames = append(fieldNames, name)
 		}
 		sort.Strings(fieldNames)
 
 		if len(fieldNames) == 0 {
-			buf.WriteString("{ }")
+			if v.isDeferred {
+				buf.WriteString(deferredColor("{ }"))
+			} else {
+				buf.WriteString("{ }")
+			}
 		} else {
 			var prefix string
 			var indent2 string
@@ -850,8 +889,11 @@ func serializeJSON(v interface{}, multiline bool, indent string, buf *bytes.Buff
 				prefix = "{"
 				indent2 = indent
 			}
+			if v.isDeferred {
+				prefix = deferredColor(prefix)
+			}
 			for _, fieldName := range fieldNames {
-				fieldVal := v[fieldName]
+				fieldVal := vv[fieldName]
 
 				buf.WriteString(prefix)
 				buf.WriteString(indent2)
@@ -859,7 +901,7 @@ func serializeJSON(v interface{}, multiline bool, indent string, buf *bytes.Buff
 				buf.WriteString(unparseString(fieldName))
 				buf.WriteString(": ")
 
-				serializeJSON(fieldVal, multiline, indent2, buf)
+				serializeJSON(fieldVal.(*manifested), multiline, indent2, buf)
 
 				if multiline {
 					prefix = ",\n"
@@ -872,11 +914,19 @@ func serializeJSON(v interface{}, multiline bool, indent string, buf *bytes.Buff
 				buf.WriteString("\n")
 			}
 			buf.WriteString(indent)
-			buf.WriteString("}")
+			if v.isDeferred {
+				buf.WriteString(deferredColor("}"))
+			} else {
+				buf.WriteString("}")
+			}
 		}
 
 	case string:
-		buf.WriteString(unparseString(v))
+		val := unparseString(vv)
+		if v.isDeferred {
+			val = deferredColor(val)
+		}
+		buf.WriteString(val)
 
 	default:
 		panic(fmt.Sprintf("Unsupported value for serialization %#+v", v))
@@ -910,7 +960,7 @@ func (i *interpreter) manifestAndSerializeMulti(v value, stringOutputMode bool) 
 	if err != nil {
 		return r, err
 	}
-	switch json := json.(type) {
+	switch json := json.value.(type) {
 	case map[string]interface{}:
 		for filename, fileJSON := range json {
 			if stringOutputMode {
@@ -924,7 +974,7 @@ func (i *interpreter) manifestAndSerializeMulti(v value, stringOutputMode bool) 
 				}
 			} else {
 				var buf bytes.Buffer
-				serializeJSON(fileJSON, true, "", &buf)
+				serializeJSON(fileJSON.(*manifested), true, "", &buf)
 				buf.WriteString("\n")
 				r[filename] = buf.String()
 			}
@@ -944,11 +994,11 @@ func (i *interpreter) manifestAndSerializeYAMLStream(v value) (r []string, err e
 	if err != nil {
 		return r, err
 	}
-	switch json := json.(type) {
+	switch json := json.value.(type) {
 	case []interface{}:
 		for _, doc := range json {
 			var buf bytes.Buffer
-			serializeJSON(doc, true, "", &buf)
+			serializeJSON(doc.(*manifested), true, "", &buf)
 			buf.WriteString("\n")
 			r = append(r, buf.String())
 		}
