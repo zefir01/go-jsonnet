@@ -66,7 +66,9 @@ type potentialValue interface {
 // A set of variables with associated thunks.
 type bindingFrame map[ast.Identifier]*cachedThunk
 
-type valueBase struct{}
+type valueBase struct {
+	isDeferred bool
+}
 
 func (v *valueBase) aValue() {}
 
@@ -91,7 +93,7 @@ type valueFlatString struct {
 
 func (s *valueFlatString) index(i *interpreter, index int) (value, error) {
 	if 0 <= index && index < s.length() {
-		return makeValueString(string(s.value[index])), nil
+		return makeValueString(string(s.value[index]), s.isDeferred), nil
 	}
 	return nil, i.Error(fmt.Sprintf("Index %d out of bounds, not within [0, %v)", index, s.length()))
 }
@@ -137,7 +139,7 @@ func (s *valueStringTree) flattenToLeft() {
 	if s.right != nil {
 		result := make([]rune, 0, s.len)
 		buildFullString(s, &result)
-		s.left = makeStringFromRunes(result)
+		s.left = makeStringFromRunes(result, s.isDeferred)
 		s.right = nil
 	}
 }
@@ -172,11 +174,13 @@ func emptyString() *valueFlatString {
 	return &valueFlatString{}
 }
 
-func makeStringFromRunes(runes []rune) *valueFlatString {
-	return &valueFlatString{value: runes}
+func makeStringFromRunes(runes []rune, isDeferred bool) *valueFlatString {
+	return &valueFlatString{value: runes, valueBase: valueBase{isDeferred: isDeferred}}
 }
 
 func concatStrings(a, b valueString) valueString {
+	isDefered := isDeferred(a) || isDeferred(b)
+
 	aLen := a.length()
 	bLen := b.length()
 	if aLen == 0 {
@@ -189,12 +193,13 @@ func concatStrings(a, b valueString) valueString {
 		result := make([]rune, 0, aLen+bLen)
 		result = append(result, runesA...)
 		result = append(result, runesB...)
-		return makeStringFromRunes(result)
+		return makeStringFromRunes(result, isDefered)
 	} else {
 		return &valueStringTree{
-			left:  a,
-			right: b,
-			len:   aLen + bLen,
+			left:      a,
+			right:     b,
+			len:       aLen + bLen,
+			valueBase: valueBase{isDeferred: isDefered},
 		}
 	}
 }
@@ -230,8 +235,8 @@ func stringEqual(a, b valueString) bool {
 	return true
 }
 
-func makeValueString(v string) valueString {
-	return &valueFlatString{value: []rune(v)}
+func makeValueString(v string, isDeferred bool) valueString {
+	return &valueFlatString{value: []rune(v), valueBase: valueBase{isDeferred: isDeferred}}
 }
 
 type valueBoolean struct {
@@ -243,8 +248,8 @@ func (*valueBoolean) getType() *valueType {
 	return booleanType
 }
 
-func makeValueBoolean(v bool) *valueBoolean {
-	return &valueBoolean{value: v}
+func makeValueBoolean(v bool, isDeferred bool) *valueBoolean {
+	return &valueBoolean{value: v, valueBase: valueBase{isDeferred: isDeferred}}
 }
 
 type valueNumber struct {
@@ -256,16 +261,16 @@ func (*valueNumber) getType() *valueType {
 	return numberType
 }
 
-func makeValueNumber(v float64) *valueNumber {
-	return &valueNumber{value: v}
+func makeValueNumber(v float64, isDeferred bool) *valueNumber {
+	return &valueNumber{value: v, valueBase: valueBase{isDeferred: isDeferred}}
 }
 
-func intToValue(i int) *valueNumber {
-	return makeValueNumber(float64(i))
+func intToValue(i int, isDeferred bool) *valueNumber {
+	return makeValueNumber(float64(i), isDeferred)
 }
 
-func int64ToValue(i int64) *valueNumber {
-	return makeValueNumber(float64(i))
+func int64ToValue(i int64, isDeferred bool) *valueNumber {
+	return makeValueNumber(float64(i), isDeferred)
 }
 
 type valueNull struct {
@@ -301,7 +306,7 @@ func (arr *valueArray) length() int {
 	return len(arr.elements)
 }
 
-func makeValueArray(elements []*cachedThunk) *valueArray {
+func makeValueArray(elements []*cachedThunk, isDeferred bool) *valueArray {
 	// We don't want to keep a bigger array than necessary
 	// so we create a new one with minimal capacity
 	var arrayElems []*cachedThunk
@@ -311,8 +316,16 @@ func makeValueArray(elements []*cachedThunk) *valueArray {
 		arrayElems = make([]*cachedThunk, len(elements))
 		copy(arrayElems, elements)
 	}
+	for _, v := range elements {
+		if v.isDeferred {
+			isDeferred = v.isDeferred
+		}
+	}
 	return &valueArray{
 		elements: arrayElems,
+		valueBase: valueBase{
+			isDeferred: isDeferred,
+		},
 	}
 }
 
@@ -320,7 +333,7 @@ func concatArrays(a, b *valueArray) *valueArray {
 	result := make([]*cachedThunk, 0, len(a.elements)+len(b.elements))
 	result = append(result, a.elements...)
 	result = append(result, b.elements...)
-	return &valueArray{elements: result}
+	return &valueArray{elements: result, valueBase: valueBase{isDeferred: a.isDeferred || b.isDeferred}}
 }
 
 func (*valueArray) getType() *valueType {
@@ -493,7 +506,10 @@ func (*valueObject) getType() *valueType {
 }
 
 func (obj *valueObject) index(i *interpreter, field string) (value, error) {
-	return objectIndex(i, objectBinding(obj), field)
+	return objectIndex(i, objectBinding(obj), field, false)
+}
+func (obj *valueObject) indexDeferred(i *interpreter, field string) (value, error) {
+	return objectIndex(i, objectBinding(obj), field, true)
 }
 
 func (obj *valueObject) assertionsChecked() bool {
@@ -561,7 +577,7 @@ func checkAssertionsHelper(i *interpreter, obj *valueObject, curr uncachedObject
 		for _, assert := range curr.asserts {
 			sb := selfBinding{self: obj, superDepth: superDepth}
 			fieldUpValues := prepareFieldUpvalues(sb, curr.upValues, curr.locals)
-			_, err := assert.evaluate(i, sb, fieldUpValues, "")
+			_, err := assert.evaluate(i, sb, fieldUpValues, "", false)
 			if err != nil {
 				return err
 			}
@@ -590,7 +606,7 @@ func (*simpleObject) inheritanceSize() int {
 	return 1
 }
 
-func makeValueSimpleObject(b bindingFrame, fields simpleObjectFieldMap, asserts []unboundField, locals []objectLocal) *valueObject {
+func makeValueSimpleObject(b bindingFrame, fields simpleObjectFieldMap, asserts []unboundField, locals []objectLocal, isDeferred bool) *valueObject {
 	return &valueObject{
 		cache: make(map[objectCacheKey]value),
 		uncached: &simpleObject{
@@ -599,6 +615,7 @@ func makeValueSimpleObject(b bindingFrame, fields simpleObjectFieldMap, asserts 
 			asserts:  asserts,
 			locals:   locals,
 		},
+		valueBase: valueBase{isDeferred: isDeferred},
 	}
 }
 
@@ -611,7 +628,7 @@ type simpleObjectField struct {
 
 // unboundField is a field that doesn't know yet in which object it is.
 type unboundField interface {
-	evaluate(i *interpreter, sb selfBinding, origBinding bindingFrame, fieldName string) (value, error)
+	evaluate(i *interpreter, sb selfBinding, origBinding bindingFrame, fieldName string, isDeferred bool) (value, error)
 	loc() *ast.LocationRange
 }
 
@@ -649,6 +666,7 @@ func makeValueExtendedObject(left, right *valueObject) *valueObject {
 			right:                right.uncached,
 			totalInheritanceSize: left.uncached.inheritanceSize() + right.uncached.inheritanceSize(),
 		},
+		valueBase: valueBase{isDeferred: left.isDeferred || right.isDeferred},
 	}
 }
 
@@ -700,7 +718,7 @@ func prepareFieldUpvalues(sb selfBinding, upValues bindingFrame, locals []object
 	return newUpValues
 }
 
-func objectIndex(i *interpreter, sb selfBinding, fieldName string) (value, error) {
+func objectIndex(i *interpreter, sb selfBinding, fieldName string, isDeferred bool) (value, error) {
 	err := checkAssertions(i, sb.self)
 	if err != nil {
 		return nil, err
@@ -711,6 +729,16 @@ func objectIndex(i *interpreter, sb selfBinding, fieldName string) (value, error
 
 	found, field, upValues, locals, foundAt := findField(sb.self.uncached, sb.superDepth, fieldName)
 	if !found {
+		found, field, upValues, locals, foundAt := findField(sb.self.uncached, sb.superDepth, "_schema")
+		if found {
+			fieldSelfBinding := selfBinding{self: sb.self, superDepth: foundAt}
+			fieldUpValues := prepareFieldUpvalues(fieldSelfBinding, upValues, locals)
+			val, err := field.field.evaluate(i, fieldSelfBinding, fieldUpValues, "_schema", true)
+			o := val.(*valueObject)
+			val, err = o.indexDeferred(i, fieldName)
+			return val, err
+		}
+
 		return nil, i.Error(fmt.Sprintf("Field does not exist: %s", fieldName))
 	}
 
@@ -721,7 +749,7 @@ func objectIndex(i *interpreter, sb selfBinding, fieldName string) (value, error
 	fieldSelfBinding := selfBinding{self: sb.self, superDepth: foundAt}
 	fieldUpValues := prepareFieldUpvalues(fieldSelfBinding, upValues, locals)
 
-	val, err := field.field.evaluate(i, fieldSelfBinding, fieldUpValues, fieldName)
+	val, err := field.field.evaluate(i, fieldSelfBinding, fieldUpValues, fieldName, isDeferred)
 
 	if err == nil {
 		sb.self.cache[objectCacheKey{field: fieldName, depth: foundAt}] = val

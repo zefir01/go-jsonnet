@@ -50,7 +50,7 @@ func builtinPlus(i *interpreter, x, y value) (value, error) {
 		if err != nil {
 			return nil, err
 		}
-		return makeDoubleCheck(i, left.value+right.value)
+		return makeDoubleCheck(i, left.value+right.value, left.isDeferred || right.isDeferred)
 	case valueString:
 		right, err := builtinToString(i, y)
 		if err != nil {
@@ -85,7 +85,7 @@ func builtinMinus(i *interpreter, xv, yv value) (value, error) {
 	if err != nil {
 		return nil, err
 	}
-	return makeDoubleCheck(i, x.value-y.value)
+	return makeDoubleCheck(i, x.value-y.value, x.isDeferred || y.isDeferred)
 }
 
 func builtinMult(i *interpreter, xv, yv value) (value, error) {
@@ -97,7 +97,7 @@ func builtinMult(i *interpreter, xv, yv value) (value, error) {
 	if err != nil {
 		return nil, err
 	}
-	return makeDoubleCheck(i, x.value*y.value)
+	return makeDoubleCheck(i, x.value*y.value, x.isDeferred || y.isDeferred)
 }
 
 func builtinDiv(i *interpreter, xv, yv value) (value, error) {
@@ -112,7 +112,7 @@ func builtinDiv(i *interpreter, xv, yv value) (value, error) {
 	if y.value == 0 {
 		return nil, i.Error("Division by zero.")
 	}
-	return makeDoubleCheck(i, x.value/y.value)
+	return makeDoubleCheck(i, x.value/y.value, x.isDeferred || y.isDeferred)
 }
 
 func builtinModulo(i *interpreter, xv, yv value) (value, error) {
@@ -127,95 +127,111 @@ func builtinModulo(i *interpreter, xv, yv value) (value, error) {
 	if y.value == 0 {
 		return nil, i.Error("Division by zero.")
 	}
-	return makeDoubleCheck(i, math.Mod(x.value, y.value))
+	return makeDoubleCheck(i, math.Mod(x.value, y.value), x.isDeferred || y.isDeferred)
 }
 
-func valueCmp(i *interpreter, x, y value) (int, error) {
+func isDeferred(val valueString) bool {
+	switch v := val.(type) {
+	case *valueFlatString:
+		return v.isDeferred
+	case *valueStringTree:
+		return v.isDeferred
+	default:
+		return false
+	}
+}
+
+func valueCmp(i *interpreter, x, y value) (int, bool, error) {
 	switch left := x.(type) {
 	case *valueNumber:
 		right, err := i.getNumber(y)
 		if err != nil {
-			return 0, err
+			return 0, left.isDeferred || right.isDeferred, err
 		}
-		return float64Cmp(left.value, right.value), nil
+		return float64Cmp(left.value, right.value), left.isDeferred || right.isDeferred, nil
 	case valueString:
 		right, err := i.getString(y)
 		if err != nil {
-			return 0, err
+			return 0, isDeferred(left) || isDeferred(right), err
 		}
-		return stringCmp(left, right), nil
+		return stringCmp(left, right), isDeferred(left) || isDeferred(right), nil
 	case *valueArray:
 		right, err := i.getArray(y)
 		if err != nil {
-			return 0, err
+			return 0, i.isDeferred(x) || i.isDeferred(y), err
 		}
 		return arrayCmp(i, left, right)
 	default:
-		return 0, i.typeErrorGeneral(x)
+		return 0, true, i.typeErrorGeneral(x)
 	}
 }
 
-func arrayCmp(i *interpreter, x, y *valueArray) (int, error) {
+func arrayCmp(i *interpreter, x, y *valueArray) (int, bool, error) {
+	isDeferred := x.isDeferred || y.isDeferred
 	for index := 0; index < minInt(x.length(), y.length()); index++ {
 		left, err := x.index(i, index)
 		if err != nil {
-			return 0, err
+			return 0, isDeferred, err
 		}
 		right, err := y.index(i, index)
 		if err != nil {
-			return 0, err
+			return 0, isDeferred, err
 		}
-		cmp, err := valueCmp(i, left, right)
+		cmp, _, err := valueCmp(i, left, right)
 		if err != nil {
-			return 0, err
+			return 0, isDeferred, err
 		}
 		if cmp != 0 {
-			return cmp, nil
+			return cmp, isDeferred, nil
 		}
 	}
-	return intCmp(x.length(), y.length()), nil
+	return intCmp(x.length(), y.length()), isDeferred, nil
 }
 
 func builtinLess(i *interpreter, x, y value) (value, error) {
-	r, err := valueCmp(i, x, y)
+	r, isDeferred, err := valueCmp(i, x, y)
 	if err != nil {
 		return nil, err
 	}
-	return makeValueBoolean(r == -1), nil
+	return makeValueBoolean(r == -1, isDeferred), nil
 }
 
 func builtinGreater(i *interpreter, x, y value) (value, error) {
-	r, err := valueCmp(i, x, y)
+	r, isDeferred, err := valueCmp(i, x, y)
 	if err != nil {
 		return nil, err
 	}
-	return makeValueBoolean(r == 1), nil
+	return makeValueBoolean(r == 1, isDeferred), nil
 }
 
 func builtinGreaterEq(i *interpreter, x, y value) (value, error) {
-	r, err := valueCmp(i, x, y)
+	r, isDeferred, err := valueCmp(i, x, y)
 	if err != nil {
 		return nil, err
 	}
-	return makeValueBoolean(r >= 0), nil
+	return makeValueBoolean(r >= 0, isDeferred), nil
 }
 
 func builtinLessEq(i *interpreter, x, y value) (value, error) {
-	r, err := valueCmp(i, x, y)
+	r, isDeferred, err := valueCmp(i, x, y)
 	if err != nil {
 		return nil, err
 	}
-	return makeValueBoolean(r <= 0), nil
+	return makeValueBoolean(r <= 0, isDeferred), nil
 }
 
 func builtinLength(i *interpreter, x value) (value, error) {
 	var num int
+	var deferred bool
 	switch x := x.(type) {
 	case *valueObject:
+		deferred = x.isDeferred
 		num = len(objectFields(x, withoutHidden))
 	case *valueArray:
+		deferred = x.isDeferred
 		num = len(x.elements)
 	case valueString:
+		deferred = isDeferred(x)
 		num = x.length()
 	case *valueFunction:
 		for _, param := range x.parameters() {
@@ -226,7 +242,7 @@ func builtinLength(i *interpreter, x value) (value, error) {
 	default:
 		return nil, i.typeErrorGeneral(x)
 	}
-	return makeValueNumber(float64(num)), nil
+	return makeValueNumber(float64(num), deferred), nil
 }
 
 func builtinToString(i *interpreter, x value) (value, error) {
@@ -239,7 +255,7 @@ func builtinToString(i *interpreter, x value) (value, error) {
 	if err != nil {
 		return nil, err
 	}
-	return makeValueString(buf.String()), nil
+	return makeValueString(buf.String(), i.isDeferred(x)), nil
 }
 
 func builtinTrace(i *interpreter, x value, y value) (value, error) {
@@ -286,7 +302,7 @@ func builtinMakeArray(i *interpreter, szv, funcv value) (value, error) {
 		}
 		elems = append(elems, elem)
 	}
-	return makeValueArray(elems), nil
+	return makeValueArray(elems, false), nil
 }
 
 func builtinFlatMap(i *interpreter, funcv, arrv value) (value, error) {
@@ -296,6 +312,7 @@ func builtinFlatMap(i *interpreter, funcv, arrv value) (value, error) {
 	}
 	switch arrv := arrv.(type) {
 	case *valueArray:
+		deferred := false
 		num := arrv.length()
 		// Start with capacity of the original array.
 		// This may spare us a few reallocations.
@@ -303,6 +320,9 @@ func builtinFlatMap(i *interpreter, funcv, arrv value) (value, error) {
 		elems := make([]*cachedThunk, 0, num)
 		for counter := 0; counter < num; counter++ {
 			returnedValue, err := fun.call(i, args(arrv.elements[counter]))
+			if i.isDeferred(returnedValue) {
+				deferred = true
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -312,11 +332,11 @@ func builtinFlatMap(i *interpreter, funcv, arrv value) (value, error) {
 			}
 			elems = append(elems, returned.elements...)
 		}
-		return makeValueArray(elems), nil
+		return makeValueArray(elems, deferred), nil
 	case valueString:
 		var str strings.Builder
 		for _, elem := range arrv.getRunes() {
-			returnedValue, err := fun.call(i, args(readyThunk(makeValueString(string(elem)))))
+			returnedValue, err := fun.call(i, args(readyThunk(makeValueString(string(elem), i.isDeferred(arrv)))))
 			if err != nil {
 				return nil, err
 			}
@@ -326,7 +346,7 @@ func builtinFlatMap(i *interpreter, funcv, arrv value) (value, error) {
 			}
 			str.WriteString(returned.getGoString())
 		}
-		return makeValueString(str.String()), nil
+		return makeValueString(str.String(), i.isDeferred(arrv)), nil
 	default:
 		return nil, i.Error("std.flatMap second param must be array / string, got " + arrv.getType().name)
 	}
@@ -354,7 +374,7 @@ func joinArrays(i *interpreter, sep *valueArray, arr *valueArray) (value, error)
 		first = false
 
 	}
-	return makeValueArray(result), nil
+	return makeValueArray(result, sep.isDeferred || arr.isDeferred), nil
 }
 
 func joinStrings(i *interpreter, sep valueString, arr *valueArray) (value, error) {
@@ -378,7 +398,7 @@ func joinStrings(i *interpreter, sep valueString, arr *valueArray) (value, error
 		}
 		first = false
 	}
-	return makeStringFromRunes(result), nil
+	return makeStringFromRunes(result, i.isDeferred(sep) || arr.isDeferred), nil
 }
 
 func builtinJoin(i *interpreter, sep, arrv value) (value, error) {
@@ -406,7 +426,7 @@ func builtinFoldl(i *interpreter, funcv, arrv, initv value) (value, error) {
 	switch arrType := arrv.(type) {
 	case valueString:
 		for _, item := range arrType.getRunes() {
-			elements = append(elements, readyThunk(makeStringFromRunes([]rune{item})))
+			elements = append(elements, readyThunk(makeStringFromRunes([]rune{item}, i.isDeferred(arrv))))
 		}
 		numElements = len(elements)
 	case *valueArray:
@@ -437,7 +457,7 @@ func builtinFoldr(i *interpreter, funcv, arrv, initv value) (value, error) {
 	switch arrType := arrv.(type) {
 	case valueString:
 		for _, item := range arrType.getRunes() {
-			elements = append(elements, readyThunk(makeStringFromRunes([]rune{item})))
+			elements = append(elements, readyThunk(makeStringFromRunes([]rune{item}, i.isDeferred(arrv))))
 		}
 		numElements = len(elements)
 	case *valueArray:
@@ -472,7 +492,7 @@ func builtinReverse(i *interpreter, arrv value) (value, error) {
 		reversedArray[i] = arr.elements[j]
 	}
 
-	return makeValueArray(reversedArray), nil
+	return makeValueArray(reversedArray, arr.isDeferred), nil
 }
 
 func builtinFilter(i *interpreter, funcv, arrv value) (value, error) {
@@ -502,7 +522,7 @@ func builtinFilter(i *interpreter, funcv, arrv value) (value, error) {
 			elems = append(elems, arr.elements[counter])
 		}
 	}
-	return makeValueArray(elems), nil
+	return makeValueArray(elems, arr.isDeferred), nil
 }
 func builtinLstripChars(i *interpreter, str, chars value) (value, error) {
 	switch strType := str.(type) {
@@ -512,14 +532,14 @@ func builtinLstripChars(i *interpreter, str, chars value) (value, error) {
 			if err != nil {
 				return nil, err
 			}
-			member, err := rawMember(i, chars, index)
+			member, deferred, err := rawMember(i, chars, index)
 			if err != nil {
 				return nil, err
 			}
 			if member {
 				runes := strType.getRunes()
 				s := string(runes[1:])
-				return builtinLstripChars(i, makeValueString(s), chars)
+				return builtinLstripChars(i, makeValueString(s, deferred), chars)
 			} else {
 				return str, nil
 			}
@@ -538,14 +558,14 @@ func builtinRstripChars(i *interpreter, str, chars value) (value, error) {
 			if err != nil {
 				return nil, err
 			}
-			member, err := rawMember(i, chars, index)
+			member, deferred, err := rawMember(i, chars, index)
 			if err != nil {
 				return nil, err
 			}
 			if member {
 				runes := strType.getRunes()
 				s := string(runes[:len(runes)-1])
-				return builtinRstripChars(i, makeValueString(s), chars)
+				return builtinRstripChars(i, makeValueString(s, deferred), chars)
 			} else {
 				return str, nil
 			}
@@ -568,46 +588,47 @@ func builtinStripChars(i *interpreter, str, chars value) (value, error) {
 	return rstripChars, nil
 }
 
-func rawMember(i *interpreter, arrv, value value) (bool, error) {
+func rawMember(i *interpreter, arrv, value value) (bool, bool, error) {
+	deferred := i.isDeferred(arrv) || i.isDeferred(value)
 	switch arrType := arrv.(type) {
 	case valueString:
 		valString, err := i.getString(value)
 		if err != nil {
-			return false, err
+			return false, deferred, err
 		}
 
 		arrString, err := i.getString(arrv)
 		if err != nil {
-			return false, err
+			return false, deferred, err
 		}
 
-		return strings.Contains(arrString.getGoString(), valString.getGoString()), nil
+		return strings.Contains(arrString.getGoString(), valString.getGoString()), deferred, nil
 	case *valueArray:
 		for _, elem := range arrType.elements {
 			cachedThunkValue, err := elem.getValue(i)
 			if err != nil {
-				return false, err
+				return false, deferred, err
 			}
-			equal, err := rawEquals(i, cachedThunkValue, value)
+			equal, deferred, err := rawEquals(i, cachedThunkValue, value)
 			if err != nil {
-				return false, err
+				return false, deferred, err
 			}
 			if equal {
-				return true, nil
+				return true, deferred, nil
 			}
 		}
 	default:
-		return false, i.Error("std.member first argument must be an array or a string")
+		return false, deferred, i.Error("std.member first argument must be an array or a string")
 	}
-	return false, nil
+	return false, deferred, nil
 }
 
 func builtinMember(i *interpreter, arrv, value value) (value, error) {
-	eq, err := rawMember(i, arrv, value)
+	eq, deferred, err := rawMember(i, arrv, value)
 	if err != nil {
 		return nil, err
 	}
-	return makeValueBoolean(eq), nil
+	return makeValueBoolean(eq, deferred), nil
 }
 
 type sortData struct {
@@ -622,7 +643,7 @@ func (d *sortData) Len() int {
 }
 
 func (d *sortData) Less(i, j int) bool {
-	r, err := valueCmp(d.i, d.keys[i], d.keys[j])
+	r, _, err := valueCmp(d.i, d.keys[i], d.keys[j])
 	if err != nil {
 		d.err = err
 		panic("Error while comparing elements")
@@ -663,10 +684,15 @@ func builtinSort(i *interpreter, arguments []value) (value, error) {
 
 	data := sortData{i: i, thunks: make([]*cachedThunk, num), keys: make([]value, num)}
 
+	deferred := false
 	for counter := 0; counter < num; counter++ {
 		var err error
 		data.thunks[counter] = arr.elements[counter]
-		data.keys[counter], err = keyF.call(i, args(arr.elements[counter]))
+		v, err := keyF.call(i, args(arr.elements[counter]))
+		data.keys[counter] = v
+		if i.isDeferred(v) {
+			deferred = true
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -677,10 +703,11 @@ func builtinSort(i *interpreter, arguments []value) (value, error) {
 		return nil, err
 	}
 
-	return makeValueArray(data.thunks), nil
+	return makeValueArray(data.thunks, deferred), nil
 }
 
 func builtinRange(i *interpreter, fromv, tov value) (value, error) {
+	deferred := i.isDeferred(fromv) || i.isDeferred(tov)
 	from, err := i.getInt(fromv)
 	if err != nil {
 		return nil, err
@@ -691,9 +718,9 @@ func builtinRange(i *interpreter, fromv, tov value) (value, error) {
 	}
 	elems := make([]*cachedThunk, to-from+1)
 	for i := from; i <= to; i++ {
-		elems[i-from] = readyThunk(intToValue(i))
+		elems[i-from] = readyThunk(intToValue(i, deferred))
 	}
-	return makeValueArray(elems), nil
+	return makeValueArray(elems, deferred), nil
 }
 
 func builtinNegation(i *interpreter, x value) (value, error) {
@@ -701,7 +728,7 @@ func builtinNegation(i *interpreter, x value) (value, error) {
 	if err != nil {
 		return nil, err
 	}
-	return makeValueBoolean(!b.value), nil
+	return makeValueBoolean(!b.value, i.isDeferred(x)), nil
 }
 
 func builtinXnor(i *interpreter, xv, yv value) (value, error) {
@@ -713,7 +740,7 @@ func builtinXnor(i *interpreter, xv, yv value) (value, error) {
 	if err != nil {
 		return nil, err
 	}
-	return makeValueBoolean(p.value == q.value), nil
+	return makeValueBoolean(p.value == q.value, i.isDeferred(xv) || i.isDeferred(yv)), nil
 }
 
 func builtinXor(i *interpreter, xv, yv value) (value, error) {
@@ -725,7 +752,7 @@ func builtinXor(i *interpreter, xv, yv value) (value, error) {
 	if err != nil {
 		return nil, err
 	}
-	return makeValueBoolean(p.value != q.value), nil
+	return makeValueBoolean(p.value != q.value, i.isDeferred(xv) || i.isDeferred(yv)), nil
 }
 
 func builtinBitNeg(i *interpreter, x value) (value, error) {
@@ -734,7 +761,7 @@ func builtinBitNeg(i *interpreter, x value) (value, error) {
 		return nil, err
 	}
 	intValue := int64(n.value)
-	return int64ToValue(^intValue), nil
+	return int64ToValue(^intValue, i.isDeferred(x)), nil
 }
 
 func builtinIdentity(i *interpreter, x value) (value, error) {
@@ -747,7 +774,7 @@ func builtinUnaryPlus(i *interpreter, x value) (value, error) {
 		return nil, err
 	}
 
-	return makeValueNumber(n.value), nil
+	return makeValueNumber(n.value, i.isDeferred(x)), nil
 }
 
 func builtinUnaryMinus(i *interpreter, x value) (value, error) {
@@ -755,14 +782,15 @@ func builtinUnaryMinus(i *interpreter, x value) (value, error) {
 	if err != nil {
 		return nil, err
 	}
-	return makeValueNumber(-n.value), nil
+	return makeValueNumber(-n.value, i.isDeferred(x)), nil
 }
 
 // TODO(sbarzowski) since we have a builtin implementation of equals it's no longer really
 // needed and we should deprecate it eventually
 func primitiveEquals(i *interpreter, x, y value) (value, error) {
+	deferred := i.isDeferred(x) || i.isDeferred(y)
 	if x.getType() != y.getType() {
-		return makeValueBoolean(false), nil
+		return makeValueBoolean(false, deferred), nil
 	}
 	switch left := x.(type) {
 	case *valueBoolean:
@@ -770,21 +798,21 @@ func primitiveEquals(i *interpreter, x, y value) (value, error) {
 		if err != nil {
 			return nil, err
 		}
-		return makeValueBoolean(left.value == right.value), nil
+		return makeValueBoolean(left.value == right.value, deferred), nil
 	case *valueNumber:
 		right, err := i.getNumber(y)
 		if err != nil {
 			return nil, err
 		}
-		return makeValueBoolean(left.value == right.value), nil
+		return makeValueBoolean(left.value == right.value, deferred), nil
 	case valueString:
 		right, err := i.getString(y)
 		if err != nil {
 			return nil, err
 		}
-		return makeValueBoolean(stringEqual(left, right)), nil
+		return makeValueBoolean(stringEqual(left, right), deferred), nil
 	case *valueNull:
-		return makeValueBoolean(true), nil
+		return makeValueBoolean(true, deferred), nil
 	case *valueFunction:
 		return nil, i.Error("Cannot test equality of functions")
 	default:
@@ -794,117 +822,118 @@ func primitiveEquals(i *interpreter, x, y value) (value, error) {
 	}
 }
 
-func rawEquals(i *interpreter, x, y value) (bool, error) {
+func rawEquals(i *interpreter, x, y value) (bool, bool, error) {
+	isDeferred := i.isDeferred(x) || i.isDeferred(y)
 	if x.getType() != y.getType() {
-		return false, nil
+		return false, isDeferred, nil
 	}
 	switch left := x.(type) {
 	case *valueBoolean:
 		right, err := i.getBoolean(y)
 		if err != nil {
-			return false, err
+			return false, isDeferred, err
 		}
-		return left.value == right.value, nil
+		return left.value == right.value, isDeferred, nil
 	case *valueNumber:
 		right, err := i.getNumber(y)
 		if err != nil {
-			return false, err
+			return false, isDeferred, err
 		}
-		return left.value == right.value, nil
+		return left.value == right.value, isDeferred, nil
 	case valueString:
 		right, err := i.getString(y)
 		if err != nil {
-			return false, err
+			return false, isDeferred, err
 		}
-		return stringEqual(left, right), nil
+		return stringEqual(left, right), isDeferred, nil
 	case *valueNull:
-		return true, nil
+		return true, isDeferred, nil
 	case *valueArray:
 		right, err := i.getArray(y)
 		if err != nil {
-			return false, err
+			return false, isDeferred, err
 		}
 		if left.length() != right.length() {
-			return false, nil
+			return false, isDeferred, nil
 		}
 		for j := range left.elements {
 			leftElem, err := i.evaluatePV(left.elements[j])
 			if err != nil {
-				return false, err
+				return false, isDeferred, err
 			}
 			rightElem, err := i.evaluatePV(right.elements[j])
 			if err != nil {
-				return false, err
+				return false, isDeferred, err
 			}
-			eq, err := rawEquals(i, leftElem, rightElem)
+			eq, _, err := rawEquals(i, leftElem, rightElem)
 			if err != nil {
-				return false, err
+				return false, isDeferred, err
 			}
 			if !eq {
-				return false, nil
+				return false, isDeferred, nil
 			}
 		}
-		return true, nil
+		return true, isDeferred, nil
 	case *valueObject:
 		right, err := i.getObject(y)
 		if err != nil {
-			return false, err
+			return false, isDeferred, err
 		}
 		leftFields := objectFields(left, withoutHidden)
 		rightFields := objectFields(right, withoutHidden)
 		sort.Strings(leftFields)
 		sort.Strings(rightFields)
 		if len(leftFields) != len(rightFields) {
-			return false, nil
+			return false, isDeferred, nil
 		}
 		for i := range leftFields {
 			if leftFields[i] != rightFields[i] {
-				return false, nil
+				return false, isDeferred, nil
 			}
 		}
 		for j := range leftFields {
 			fieldName := leftFields[j]
 			leftField, err := left.index(i, fieldName)
 			if err != nil {
-				return false, err
+				return false, isDeferred, err
 			}
 			rightField, err := right.index(i, fieldName)
 			if err != nil {
-				return false, err
+				return false, isDeferred, err
 			}
-			eq, err := rawEquals(i, leftField, rightField)
+			eq, _, err := rawEquals(i, leftField, rightField)
 			if err != nil {
-				return false, err
+				return false, isDeferred, err
 			}
 			if !eq {
-				return false, nil
+				return false, isDeferred, nil
 			}
 		}
-		return true, nil
+		return true, isDeferred, nil
 	case *valueFunction:
-		return false, i.Error("Cannot test equality of functions")
+		return false, isDeferred, i.Error("Cannot test equality of functions")
 	}
 	panic(fmt.Sprintf("Unhandled case in equals %#+v %#+v", x, y))
 }
 
 func builtinEquals(i *interpreter, x, y value) (value, error) {
-	eq, err := rawEquals(i, x, y)
+	eq, isDeferred, err := rawEquals(i, x, y)
 	if err != nil {
 		return nil, err
 	}
-	return makeValueBoolean(eq), nil
+	return makeValueBoolean(eq, i.isDeferred(x) || i.isDeferred(y) || isDeferred), nil
 }
 
 func builtinNotEquals(i *interpreter, x, y value) (value, error) {
-	eq, err := rawEquals(i, x, y)
+	eq, isDeferred, err := rawEquals(i, x, y)
 	if err != nil {
 		return nil, err
 	}
-	return makeValueBoolean(!eq), nil
+	return makeValueBoolean(!eq, i.isDeferred(x) || i.isDeferred(y) || isDeferred), nil
 }
 
 func builtinType(i *interpreter, x value) (value, error) {
-	return makeValueString(x.getType().name), nil
+	return makeValueString(x.getType().name, false), nil
 }
 
 func builtinMd5(i *interpreter, x value) (value, error) {
@@ -913,7 +942,7 @@ func builtinMd5(i *interpreter, x value) (value, error) {
 		return nil, err
 	}
 	hash := md5.Sum([]byte(str.getGoString()))
-	return makeValueString(hex.EncodeToString(hash[:])), nil
+	return makeValueString(hex.EncodeToString(hash[:]), i.isDeferred(x)), nil
 }
 
 func builtinBase64(i *interpreter, input value) (value, error) {
@@ -976,7 +1005,7 @@ func builtinBase64(i *interpreter, input value) (value, error) {
 	}
 
 	sEnc := base64.StdEncoding.EncodeToString(byteArr)
-	return makeValueString(sEnc), nil
+	return makeValueString(sEnc, i.isDeferred(input)), nil
 }
 
 func builtinEncodeUTF8(i *interpreter, x value) (value, error) {
@@ -987,9 +1016,9 @@ func builtinEncodeUTF8(i *interpreter, x value) (value, error) {
 	s := str.getGoString()
 	elems := make([]*cachedThunk, 0, len(s)) // it will be longer if characters fall outside of ASCII
 	for _, c := range []byte(s) {
-		elems = append(elems, readyThunk(makeValueNumber(float64(c))))
+		elems = append(elems, readyThunk(makeValueNumber(float64(c), i.isDeferred(x))))
 	}
-	return makeValueArray(elems), nil
+	return makeValueArray(elems, i.isDeferred(x)), nil
 }
 
 func builtinDecodeUTF8(i *interpreter, x value) (value, error) {
@@ -1008,7 +1037,7 @@ func builtinDecodeUTF8(i *interpreter, x value) (value, error) {
 		}
 		bs[pos] = byte(v)
 	}
-	return makeValueString(string(bs)), nil
+	return makeValueString(string(bs), i.isDeferred(x)), nil
 }
 
 // Maximum allowed unicode codepoint
@@ -1025,7 +1054,7 @@ func builtinChar(i *interpreter, x value) (value, error) {
 	} else if n.value < 0 {
 		return nil, i.Error(fmt.Sprintf("Codepoints must be >= 0, got %v", n.value))
 	}
-	return makeValueString(string(rune(n.value))), nil
+	return makeValueString(string(rune(n.value)), i.isDeferred(x)), nil
 }
 
 func builtinCodepoint(i *interpreter, x value) (value, error) {
@@ -1036,17 +1065,17 @@ func builtinCodepoint(i *interpreter, x value) (value, error) {
 	if str.length() != 1 {
 		return nil, i.Error(fmt.Sprintf("codepoint takes a string of length 1, got length %v", str.length()))
 	}
-	return makeValueNumber(float64(str.getRunes()[0])), nil
+	return makeValueNumber(float64(str.getRunes()[0]), i.isDeferred(x)), nil
 }
 
-func makeDoubleCheck(i *interpreter, x float64) (value, error) {
+func makeDoubleCheck(i *interpreter, x float64, isDeferred bool) (value, error) {
 	if math.IsNaN(x) {
 		return nil, i.Error("Not a number")
 	}
 	if math.IsInf(x, 0) {
 		return nil, i.Error("Overflow")
 	}
-	return makeValueNumber(x), nil
+	return makeValueNumber(x, isDeferred), nil
 }
 
 func liftNumeric(f func(float64) float64) func(*interpreter, value) (value, error) {
@@ -1055,7 +1084,7 @@ func liftNumeric(f func(float64) float64) func(*interpreter, value) (value, erro
 		if err != nil {
 			return nil, err
 		}
-		return makeDoubleCheck(i, f(n.value))
+		return makeDoubleCheck(i, f(n.value), i.isDeferred(x))
 	}
 }
 
@@ -1107,7 +1136,7 @@ func liftBitwise(f func(int64, int64) int64, positiveRightArg bool) func(*interp
 		if positiveRightArg && y.value < 0 {
 			return nil, makeRuntimeError("Shift by negative exponent.", i.getCurrentStackTrace())
 		}
-		return makeDoubleCheck(i, float64(f(int64(x.value), int64(y.value))))
+		return makeDoubleCheck(i, float64(f(int64(x.value), int64(y.value))), i.isDeferred(xv) || i.isDeferred(yv))
 	}
 }
 
@@ -1117,7 +1146,7 @@ var builtinBitwiseAnd = liftBitwise(func(x, y int64) int64 { return x & y }, fal
 var builtinBitwiseOr = liftBitwise(func(x, y int64) int64 { return x | y }, false)
 var builtinBitwiseXor = liftBitwise(func(x, y int64) int64 { return x ^ y }, false)
 
-func builtinObjectFieldsEx(i *interpreter, objv, includeHiddenV value) (value, error) {
+func builtinObjectFieldsEx(i *interpreter, objv, includeHiddenV value) (value, error) { //TODO defer for object fields
 	obj, err := i.getObject(objv)
 	if err != nil {
 		return nil, err
@@ -1130,13 +1159,14 @@ func builtinObjectFieldsEx(i *interpreter, objv, includeHiddenV value) (value, e
 	sort.Strings(fields)
 	elems := []*cachedThunk{}
 	for _, fieldname := range fields {
-		elems = append(elems, readyThunk(makeValueString(fieldname)))
+		elems = append(elems, readyThunk(makeValueString(fieldname, false)))
 	}
-	return makeValueArray(elems), nil
+	return makeValueArray(elems, false), nil
 }
 
 func builtinObjectHasEx(i *interpreter, objv value, fnamev value, includeHiddenV value) (value, error) {
 	obj, err := i.getObject(objv)
+	deferred := i.isDeferred(fnamev) || i.isDeferred(includeHiddenV)
 	if err != nil {
 		return nil, err
 	}
@@ -1150,10 +1180,11 @@ func builtinObjectHasEx(i *interpreter, objv value, fnamev value, includeHiddenV
 	}
 	h := withHiddenFromBool(includeHidden.value)
 	hasField := objectHasField(objectBinding(obj), string(fname.getRunes()), h)
-	return makeValueBoolean(hasField), nil
+	return makeValueBoolean(hasField, deferred), nil
 }
 
 func builtinPow(i *interpreter, basev value, expv value) (value, error) {
+	deferred := i.isDeferred(basev) || i.isDeferred(expv)
 	base, err := i.getNumber(basev)
 	if err != nil {
 		return nil, err
@@ -1162,10 +1193,11 @@ func builtinPow(i *interpreter, basev value, expv value) (value, error) {
 	if err != nil {
 		return nil, err
 	}
-	return makeDoubleCheck(i, math.Pow(base.value, exp.value))
+	return makeDoubleCheck(i, math.Pow(base.value, exp.value), deferred)
 }
 
 func builtinSubstr(i *interpreter, inputStr, inputFrom, inputLen value) (value, error) {
+	deferred := i.isDeferred(inputStr) || i.isDeferred(inputFrom) || i.isDeferred(inputLen)
 	strV, err := i.getString(inputStr)
 	if err != nil {
 		msg := fmt.Sprintf("substr first parameter should be a string, got %s", inputStr.getType().name)
@@ -1216,12 +1248,13 @@ func builtinSubstr(i *interpreter, inputStr, inputFrom, inputLen value) (value, 
 	}
 
 	if fromInt > len(strStr) {
-		return makeValueString(""), nil
+		return makeValueString("", deferred), nil
 	}
-	return makeValueString(string(strStr[fromInt:endIndex])), nil
+	return makeValueString(string(strStr[fromInt:endIndex]), deferred), nil
 }
 
 func builtinSplitLimit(i *interpreter, strv, cv, maxSplitsV value) (value, error) {
+	deferred := i.isDeferred(strv) || i.isDeferred(cv) || i.isDeferred(maxSplitsV)
 	str, err := i.getString(strv)
 	if err != nil {
 		return nil, err
@@ -1252,13 +1285,14 @@ func builtinSplitLimit(i *interpreter, strv, cv, maxSplitsV value) (value, error
 	}
 	res := make([]*cachedThunk, len(strs))
 	for i := range strs {
-		res[i] = readyThunk(makeValueString(strs[i]))
+		res[i] = readyThunk(makeValueString(strs[i], deferred))
 	}
 
-	return makeValueArray(res), nil
+	return makeValueArray(res, deferred), nil
 }
 
 func builtinStrReplace(i *interpreter, strv, fromv, tov value) (value, error) {
+	deferred := i.isDeferred(strv) || i.isDeferred(fromv) || i.isDeferred(tov)
 	str, err := i.getString(strv)
 	if err != nil {
 		return nil, err
@@ -1277,7 +1311,7 @@ func builtinStrReplace(i *interpreter, strv, fromv, tov value) (value, error) {
 	if len(sFrom) == 0 {
 		return nil, i.Error("'from' string must not be zero length.")
 	}
-	return makeValueString(strings.Replace(sStr, sFrom, sTo, -1)), nil
+	return makeValueString(strings.Replace(sStr, sFrom, sTo, -1), deferred), nil
 }
 
 func builtinIsEmpty(i *interpreter, strv value) (value, error) {
@@ -1286,7 +1320,7 @@ func builtinIsEmpty(i *interpreter, strv value) (value, error) {
 		return nil, err
 	}
 	sStr := str.getGoString()
-	return makeValueBoolean(len(sStr) == 0), nil
+	return makeValueBoolean(len(sStr) == 0, i.isDeferred(strv)), nil
 }
 
 func base64DecodeGoBytes(i *interpreter, str string) ([]byte, error) {
@@ -1305,6 +1339,7 @@ func base64DecodeGoBytes(i *interpreter, str string) ([]byte, error) {
 }
 
 func builtinBase64DecodeBytes(i *interpreter, input value) (value, error) {
+	deferred := i.isDeferred(input)
 	vStr, err := i.getString(input)
 	if err != nil {
 		msg := fmt.Sprintf("base64DecodeBytes requires a string, got %s", input.getType().name)
@@ -1317,11 +1352,11 @@ func builtinBase64DecodeBytes(i *interpreter, input value) (value, error) {
 	}
 
 	res := make([]*cachedThunk, len(decodedBytes))
-	for i := range decodedBytes {
-		res[i] = readyThunk(makeValueNumber(float64(int(decodedBytes[i]))))
+	for i2 := range decodedBytes {
+		res[i2] = readyThunk(makeValueNumber(float64(int(decodedBytes[i2])), deferred))
 	}
 
-	return makeValueArray(res), nil
+	return makeValueArray(res, deferred), nil
 }
 
 func builtinBase64Decode(i *interpreter, input value) (value, error) {
@@ -1336,7 +1371,7 @@ func builtinBase64Decode(i *interpreter, input value) (value, error) {
 		return nil, err
 	}
 
-	return makeValueString(string(decodedBytes)), nil
+	return makeValueString(string(decodedBytes), i.isDeferred(input)), nil
 }
 
 func builtinUglyObjectFlatMerge(i *interpreter, x value) (value, error) {
@@ -1382,6 +1417,7 @@ func builtinUglyObjectFlatMerge(i *interpreter, x value) (value, error) {
 		newFields,
 		[]unboundField{}, // No asserts allowed
 		nil,
+		i.isDeferred(x),
 	), nil
 }
 
@@ -1396,7 +1432,7 @@ func builtinParseJSON(i *interpreter, str value) (value, error) {
 	if err != nil {
 		return nil, i.Error(fmt.Sprintf("failed to parse JSON: %v", err.Error()))
 	}
-	return jsonToValue(i, parsedJSON)
+	return jsonToValue(i, parsedJSON, i.isDeferred(str))
 }
 
 func builtinParseYAML(i *interpreter, str value) (value, error) {
@@ -1422,9 +1458,9 @@ func builtinParseYAML(i *interpreter, str value) (value, error) {
 	}
 
 	if isYamlStream {
-		return jsonToValue(i, elems)
+		return jsonToValue(i, elems, i.isDeferred(str))
 	}
-	return jsonToValue(i, elems[0])
+	return jsonToValue(i, elems[0], i.isDeferred(str))
 }
 
 func jsonEncode(v interface{}) (string, error) {
@@ -1775,7 +1811,7 @@ func builtinManifestTomlEx(i *interpreter, arguments []value) (value, error) {
 		if err != nil {
 			return nil, err
 		}
-		return makeValueString(res), nil
+		return makeValueString(res, v.isDeferred || i.isDeferred(vindent)), nil
 	default:
 		return nil, i.Error(fmt.Sprintf("TOML body must be an object. Got %s", v.getType().name))
 	}
@@ -1806,6 +1842,8 @@ func builtinManifestJSONEx(i *interpreter, arguments []value) (value, error) {
 	sindent := vindent.getGoString()
 	newline := vnewline.getGoString()
 	kvSep := vkvSep.getGoString()
+
+	deferred := i.isDeferred(vindent) || i.isDeferred(vnewline) || i.isDeferred(vkvSep)
 
 	var path []string
 
@@ -1892,7 +1930,7 @@ func builtinManifestJSONEx(i *interpreter, arguments []value) (value, error) {
 		return nil, err
 	}
 
-	return makeValueString(finalString), nil
+	return makeValueString(finalString, deferred), nil
 }
 
 func builtinExtVar(i *interpreter, name value) (value, error) {
@@ -1921,18 +1959,22 @@ func builtinNative(i *interpreter, name value) (value, error) {
 
 func builtinSum(i *interpreter, arrv value) (value, error) {
 	arr, err := i.getArray(arrv)
+	deferred := arr.isDeferred
 	if err != nil {
 		return nil, err
 	}
 	sum := 0.0
 	for _, elem := range arr.elements {
 		elemValue, err := i.evaluateNumber(elem)
+		if i.isDeferred(elemValue) {
+			deferred = true
+		}
 		if err != nil {
 			return nil, err
 		}
 		sum += elemValue.value
 	}
-	return makeValueNumber(sum), nil
+	return makeValueNumber(sum, deferred), nil
 }
 
 // Utils for builtins - TODO(sbarzowski) move to a separate file in another commit
@@ -2179,7 +2221,7 @@ func builtinParseInt(i *interpreter, x value) (value, error) {
 	if err != nil {
 		return nil, i.Error(fmt.Sprintf("%s is not a base 10 integer", str.getGoString()))
 	}
-	return makeValueNumber(float64(res)), nil
+	return makeValueNumber(float64(res), i.isDeferred(x)), nil
 }
 
 var funcBuiltins = buildBuiltinMap([]builtin{

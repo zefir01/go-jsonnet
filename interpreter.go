@@ -286,7 +286,7 @@ func (i *interpreter) newCall(env environment, trimmable bool) error {
 	return nil
 }
 
-func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
+func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus, isDeferred bool) (value, error) {
 	trace := traceElement{
 		loc:     a.Loc(),
 		context: a.Context(),
@@ -302,15 +302,15 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
 		var elements []*cachedThunk
 		for _, el := range node.Elements {
 			env := makeEnvironment(i.stack.capture(el.Expr.FreeVariables()), sb)
-			elThunk := cachedThunk{env: &env, body: el.Expr}
+			elThunk := cachedThunk{env: &env, body: el.Expr, isDeferred: isDeferred}
 			elements = append(elements, &elThunk)
 		}
-		return makeValueArray(elements), nil
+		return makeValueArray(elements, isDeferred), nil
 
 	case *ast.Binary:
 		if node.Op == ast.BopAnd {
 			// Special case for shortcut semantics.
-			xv, err := i.evaluate(node.Left, nonTailCall)
+			xv, err := i.evaluate(node.Left, nonTailCall, isDeferred)
 			if err != nil {
 				return nil, err
 			}
@@ -321,14 +321,14 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
 			if !x.value {
 				return x, nil
 			}
-			yv, err := i.evaluate(node.Right, tc)
+			yv, err := i.evaluate(node.Right, tc, isDeferred)
 			if err != nil {
 				return nil, err
 			}
 			return i.getBoolean(yv)
 		} else if node.Op == ast.BopOr {
 			// Special case for shortcut semantics.
-			xv, err := i.evaluate(node.Left, nonTailCall)
+			xv, err := i.evaluate(node.Left, nonTailCall, isDeferred)
 			if err != nil {
 				return nil, err
 			}
@@ -339,18 +339,18 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
 			if x.value {
 				return x, nil
 			}
-			yv, err := i.evaluate(node.Right, tc)
+			yv, err := i.evaluate(node.Right, tc, isDeferred)
 			if err != nil {
 				return nil, err
 			}
 			return i.getBoolean(yv)
 
 		} else {
-			left, err := i.evaluate(node.Left, nonTailCall)
+			left, err := i.evaluate(node.Left, nonTailCall, isDeferred)
 			if err != nil {
 				return nil, err
 			}
-			right, err := i.evaluate(node.Right, tc)
+			right, err := i.evaluate(node.Right, tc, isDeferred)
 			if err != nil {
 				return nil, err
 			}
@@ -360,7 +360,7 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
 		}
 
 	case *ast.Unary:
-		value, err := i.evaluate(node.Expr, tc)
+		value, err := i.evaluate(node.Expr, tc, isDeferred)
 		if err != nil {
 			return nil, err
 		}
@@ -374,7 +374,7 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
 		return result, nil
 
 	case *ast.Conditional:
-		cond, err := i.evaluate(node.Cond, nonTailCall)
+		cond, err := i.evaluate(node.Cond, nonTailCall, isDeferred)
 		if err != nil {
 			return nil, err
 		}
@@ -383,15 +383,15 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
 			return nil, err
 		}
 		if condBool.value {
-			return i.evaluate(node.BranchTrue, tc)
+			return i.evaluate(node.BranchTrue, tc, isDeferred)
 		}
-		return i.evaluate(node.BranchFalse, tc)
+		return i.evaluate(node.BranchFalse, tc, isDeferred)
 
 	case *ast.DesugaredObject:
 		// Evaluate all the field names.  Check for null, dups, etc.
 		fields := make(simpleObjectFieldMap, len(node.Fields))
 		for _, field := range node.Fields {
-			fieldNameValue, err := i.evaluate(field.Name, nonTailCall)
+			fieldNameValue, err := i.evaluate(field.Name, nonTailCall, isDeferred)
 			if err != nil {
 				return nil, err
 			}
@@ -424,10 +424,10 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
 			locals = append(locals, objectLocal{name: local.Variable, node: local.Body})
 		}
 		upValues := i.stack.capture(node.FreeVariables())
-		return makeValueSimpleObject(upValues, fields, asserts, locals), nil
+		return makeValueSimpleObject(upValues, fields, asserts, locals, isDeferred), nil
 
 	case *ast.Error:
-		msgVal, err := i.evaluate(node.Expr, nonTailCall)
+		msgVal, err := i.evaluate(node.Expr, nonTailCall, isDeferred)
 		if err != nil {
 			// error when evaluating error message
 			return nil, err
@@ -445,11 +445,11 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
 		return nil, i.Error(msg.getGoString())
 
 	case *ast.Index:
-		targetValue, err := i.evaluate(node.Target, nonTailCall)
+		targetValue, err := i.evaluate(node.Target, nonTailCall, isDeferred)
 		if err != nil {
 			return nil, err
 		}
-		index, err := i.evaluate(node.Index, nonTailCall)
+		index, err := i.evaluate(node.Index, nonTailCall, isDeferred)
 		if err != nil {
 			return nil, err
 		}
@@ -492,7 +492,7 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
 		return i.importCache.importBinary(codePath, node.File.Value, i)
 
 	case *ast.LiteralBoolean:
-		return makeValueBoolean(node.Value), nil
+		return makeValueBoolean(node.Value, isDeferred), nil
 
 	case *ast.LiteralNull:
 		return makeValueNull(), nil
@@ -505,10 +505,10 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
 		if err != nil {
 			return nil, i.Error("overflow")
 		}
-		return makeValueNumber(num), nil
+		return makeValueNumber(num, isDeferred), nil
 
 	case *ast.LiteralString:
-		return makeValueString(node.Value), nil
+		return makeValueString(node.Value, isDeferred), nil
 
 	case *ast.Local:
 		vars := make(bindingFrame, len(node.Binds))
@@ -524,7 +524,7 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
 		sz := len(i.stack.stack)
 		// Add new stack frame, with new thunk for this variable
 		// execute body WRT stack frame.
-		v, err := i.evaluate(node.Body, tc)
+		v, err := i.evaluate(node.Body, tc, isDeferred)
 		i.stack.popIfExists(sz)
 
 		return v, err
@@ -538,7 +538,7 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
 		return foo.getValue(i)
 
 	case *ast.SuperIndex:
-		index, err := i.evaluate(node.Index, nonTailCall)
+		index, err := i.evaluate(node.Index, nonTailCall, isDeferred)
 		if err != nil {
 			return nil, err
 		}
@@ -546,10 +546,10 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
 		if err != nil {
 			return nil, err
 		}
-		return objectIndex(i, i.stack.getSelfBinding().super(), indexStr.getGoString())
+		return objectIndex(i, i.stack.getSelfBinding().super(), indexStr.getGoString(), isDeferred)
 
 	case *ast.InSuper:
-		index, err := i.evaluate(node.Index, nonTailCall)
+		index, err := i.evaluate(node.Index, nonTailCall, isDeferred)
 		if err != nil {
 			return nil, err
 		}
@@ -558,7 +558,7 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
 			return nil, err
 		}
 		hasField := objectHasField(i.stack.getSelfBinding().super(), indexStr.getGoString(), withHidden)
-		return makeValueBoolean(hasField), nil
+		return makeValueBoolean(hasField, isDeferred), nil
 
 	case *ast.Function:
 		return &valueFunction{
@@ -567,7 +567,7 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
 
 	case *ast.Apply:
 		// Eval target
-		target, err := i.evaluate(node.Target, nonTailCall)
+		target, err := i.evaluate(node.Target, nonTailCall, isDeferred)
 		if err != nil {
 			return nil, err
 		}
@@ -596,7 +596,7 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus) (value, error) {
 		arguments := callArguments{
 			positional: []*cachedThunk{
 				&cachedThunk{
-					content: intToValue(node.index),
+					content: intToValue(node.index, isDeferred),
 				},
 			},
 		}
@@ -672,15 +672,24 @@ func (i *interpreter) manifestJSON(v value) (interface{}, error) {
 	switch v := v.(type) {
 
 	case *valueBoolean:
+		if v.isDeferred {
+			return fmt.Sprintf("<%t>", v.value), nil
+		}
 		return v.value, nil
 
 	case *valueFunction:
 		return nil, makeRuntimeError("couldn't manifest function as JSON", i.getCurrentStackTrace())
 
 	case *valueNumber:
+		if v.isDeferred {
+			return fmt.Sprintf("<%s>", strconv.FormatFloat(v.value, 'f', -1, 64)), nil
+		}
 		return v.value, nil
 
 	case valueString:
+		if i.isDeferred(v) {
+			return fmt.Sprintf("<%s>", v.getGoString()), nil
+		}
 		return v.getGoString(), nil
 
 	case *valueNull:
@@ -688,6 +697,17 @@ func (i *interpreter) manifestJSON(v value) (interface{}, error) {
 
 	case *valueArray:
 		result := make([]interface{}, 0, len(v.elements))
+		if v.isDeferred && len(v.elements) == 0 {
+			msg := ast.MakeLocationRangeMessage("Array element deferred")
+			i.stack.setCurrentTrace(traceElement{
+				loc: &msg,
+			})
+
+			d, _ := i.manifestJSON(makeValueString("<deferred>", true))
+			result = append(result, d)
+			i.stack.clearCurrentTrace()
+		}
+
 		for index, th := range v.elements {
 			msg := ast.MakeLocationRangeMessage(fmt.Sprintf("Array element %d", index))
 			i.stack.setCurrentTrace(traceElement{
@@ -743,6 +763,13 @@ func (i *interpreter) manifestJSON(v value) (interface{}, error) {
 			}
 			result[fieldName] = field
 			i.stack.clearCurrentTrace()
+
+			if i.isDeferred(fieldVal) {
+				v.isDeferred = true
+			}
+		}
+		if v.isDeferred {
+			result["isDeferred"] = true
 		}
 
 		return result, nil
@@ -931,7 +958,7 @@ func (i *interpreter) manifestAndSerializeYAMLStream(v value) (r []string, err e
 	return
 }
 
-func jsonToValue(i *interpreter, v interface{}) (value, error) {
+func jsonToValue(i *interpreter, v interface{}, isDeferred bool) (value, error) {
 	switch v := v.(type) {
 	case nil:
 		return &nullValue, nil
@@ -939,25 +966,25 @@ func jsonToValue(i *interpreter, v interface{}) (value, error) {
 	case []interface{}:
 		elems := make([]*cachedThunk, len(v))
 		for counter, elem := range v {
-			val, err := jsonToValue(i, elem)
+			val, err := jsonToValue(i, elem, false)
 			if err != nil {
 				return nil, err
 			}
 			elems[counter] = readyThunk(val)
 		}
-		return makeValueArray(elems), nil
+		return makeValueArray(elems, isDeferred), nil
 
 	case bool:
-		return makeValueBoolean(v), nil
+		return makeValueBoolean(v, isDeferred), nil
 	case int, int8, int16, int32, int64:
-		return makeDoubleCheck(i, v.(float64))
+		return makeDoubleCheck(i, v.(float64), isDeferred)
 	case float64:
-		return makeDoubleCheck(i, v)
+		return makeDoubleCheck(i, v, isDeferred)
 
 	case map[string]interface{}:
 		fieldMap := map[string]value{}
 		for name, f := range v {
-			val, err := jsonToValue(i, f)
+			val, err := jsonToValue(i, f, isDeferred)
 			if err != nil {
 				return nil, err
 			}
@@ -966,21 +993,21 @@ func jsonToValue(i *interpreter, v interface{}) (value, error) {
 		return buildObject(ast.ObjectFieldInherit, fieldMap), nil
 
 	case string:
-		return makeValueString(v), nil
+		return makeValueString(v, isDeferred), nil
 
 	default:
 		return nil, i.Error(fmt.Sprintf("Not a json type: %#+v", v))
 	}
 }
 
-func (i *interpreter) EvalInCleanEnv(env *environment, ast ast.Node, trimmable bool) (value, error) {
+func (i *interpreter) EvalInCleanEnv(env *environment, ast ast.Node, trimmable bool, isDeferred bool) (value, error) {
 	err := i.newCall(*env, trimmable)
 	if err != nil {
 		return nil, err
 	}
 	stackSize := len(i.stack.stack)
 
-	val, err := i.evaluate(ast, tailCall)
+	val, err := i.evaluate(ast, tailCall, isDeferred)
 	if err != nil {
 		return nil, err
 	}
@@ -1107,6 +1134,35 @@ func (i *interpreter) getBoolean(val value) (*valueBoolean, error) {
 	}
 }
 
+func (i *interpreter) isDeferred(val value) bool {
+	switch v := val.(type) {
+	case *valueBoolean:
+		return v.isDeferred
+	case *valueObject:
+		return v.isDeferred
+	case *valueFlatString:
+		return v.isDeferred
+	case *valueStringTree:
+		return v.isDeferred
+	case *valueNumber:
+		return v.isDeferred
+	case *valueArray:
+		return v.isDeferred
+	case *valueNull:
+		return v.isDeferred
+	case valueString:
+		switch s := v.(type) {
+		case *valueStringTree:
+			return s.isDeferred
+		case *valueFlatString:
+			return s.isDeferred
+		}
+	default:
+		return false
+	}
+	return false
+}
+
 //nolint:unused
 func (i *interpreter) evaluateBoolean(pv potentialValue) (*valueBoolean, error) {
 	v, err := i.evaluatePV(pv)
@@ -1205,7 +1261,7 @@ func evaluateStd(i *interpreter) (value, error) {
 	node := astgen.StdAst
 	i.stack.setCurrentTrace(evalTrace)
 	defer i.stack.clearCurrentTrace()
-	content, err := i.EvalInCleanEnv(&beforeStdEnv, node, false)
+	content, err := i.EvalInCleanEnv(&beforeStdEnv, node, false, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1223,7 +1279,7 @@ func prepareExtVars(i *interpreter, ext vmExtMap, kind string) map[string]*cache
 		case extKindNode:
 			result[name] = nodeToPV(i, diagnosticFile, content.node)
 		default:
-			result[name] = readyThunk(makeValueString(content.value))
+			result[name] = readyThunk(makeValueString(content.value, false))
 		}
 	}
 	return result
@@ -1234,7 +1290,7 @@ func buildObject(hide ast.ObjectFieldHide, fields map[string]value) *valueObject
 	for name, v := range fields {
 		fieldMap[name] = simpleObjectField{&readyValue{v}, hide}
 	}
-	return makeValueSimpleObject(bindingFrame{}, fieldMap, nil, nil)
+	return makeValueSimpleObject(bindingFrame{}, fieldMap, nil, nil, false)
 }
 
 func buildInterpreter(ext vmExtMap, nativeFuncs map[string]*NativeFunction, maxStack int, ic *importCache, traceOut io.Writer) (*interpreter, error) {
@@ -1258,16 +1314,16 @@ func buildInterpreter(ext vmExtMap, nativeFuncs map[string]*NativeFunction, maxS
 }
 
 func makeInitialEnv(filename string, baseStd *valueObject) environment {
-	fileSpecific := buildObject(ast.ObjectFieldHidden, map[string]value{
-		"thisFile": makeValueString(filename),
-	})
+	//fileSpecific := buildObject(ast.ObjectFieldHidden, map[string]value{
+	//	"thisFile": makeValueString(filename, false),
+	//})
 
-	stdThunk := readyThunk(makeValueExtendedObject(baseStd, fileSpecific))
+	//stdThunk := readyThunk(makeValueExtendedObject(baseStd, fileSpecific))
 
 	return makeEnvironment(
 		bindingFrame{
-			"std":  stdThunk,
-			"$std": stdThunk, // Unavailable to the user. To be used with desugaring.
+			//"std":  stdThunk,
+			//"$std": stdThunk, // Unavailable to the user. To be used with desugaring.
 		},
 		makeUnboundSelfBinding(),
 	)
@@ -1287,7 +1343,7 @@ func evaluateAux(i *interpreter, node ast.Node, tla vmExtMap) (value, error) {
 	}
 	env := makeInitialEnv(node.Loc().FileName, i.baseStd)
 	i.stack.setCurrentTrace(evalTrace)
-	result, err := i.EvalInCleanEnv(&env, node, false)
+	result, err := i.EvalInCleanEnv(&env, node, false, false)
 	i.stack.clearCurrentTrace()
 	if err != nil {
 		return nil, err

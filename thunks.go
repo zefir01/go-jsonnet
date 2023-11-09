@@ -34,7 +34,7 @@ type readyValue struct {
 	content value
 }
 
-func (rv *readyValue) evaluate(i *interpreter, sb selfBinding, origBinding bindingFrame, fieldName string) (value, error) {
+func (rv *readyValue) evaluate(i *interpreter, sb selfBinding, origBinding bindingFrame, fieldName string, isDeferred bool) (value, error) {
 	return rv.content, nil
 }
 
@@ -57,7 +57,8 @@ type cachedThunk struct {
 	// If nil, use err.
 	content value
 	// If also nil, content is not cached yet.
-	err error
+	err        error
+	isDeferred bool
 }
 
 func readyThunk(content value) *cachedThunk {
@@ -71,7 +72,7 @@ func (t *cachedThunk) getValue(i *interpreter) (value, error) {
 	if t.err != nil {
 		return nil, t.err
 	}
-	v, err := i.EvalInCleanEnv(t.env, t.body, false)
+	v, err := i.EvalInCleanEnv(t.env, t.body, false, t.isDeferred)
 	if err != nil {
 		// TODO(sbarzowski) perhaps cache errors as well
 		// may be necessary if we allow handling them in any way
@@ -93,9 +94,9 @@ type codeUnboundField struct {
 	body ast.Node
 }
 
-func (f *codeUnboundField) evaluate(i *interpreter, sb selfBinding, origBindings bindingFrame, fieldName string) (value, error) {
+func (f *codeUnboundField) evaluate(i *interpreter, sb selfBinding, origBindings bindingFrame, fieldName string, isDeferred bool) (value, error) {
 	env := makeEnvironment(origBindings, sb)
-	val, err := i.EvalInCleanEnv(&env, f.body, false)
+	val, err := i.EvalInCleanEnv(&env, f.body, false, isDeferred)
 	return val, err
 }
 
@@ -110,7 +111,7 @@ type bindingsUnboundField struct {
 	bindings bindingFrame
 }
 
-func (f *bindingsUnboundField) evaluate(i *interpreter, sb selfBinding, origBindings bindingFrame, fieldName string) (value, error) {
+func (f *bindingsUnboundField) evaluate(i *interpreter, sb selfBinding, origBindings bindingFrame, fieldName string, isDeferred bool) (value, error) {
 	upValues := make(bindingFrame, len(origBindings)+len(f.bindings))
 	for variable, pvalue := range origBindings {
 		upValues[variable] = pvalue
@@ -118,7 +119,7 @@ func (f *bindingsUnboundField) evaluate(i *interpreter, sb selfBinding, origBind
 	for variable, pvalue := range f.bindings {
 		upValues[variable] = pvalue
 	}
-	return f.inner.evaluate(i, sb, upValues, fieldName)
+	return f.inner.evaluate(i, sb, upValues, fieldName, isDeferred)
 }
 
 func (f *bindingsUnboundField) loc() *ast.LocationRange {
@@ -130,7 +131,7 @@ type plusSuperUnboundField struct {
 	inner unboundField
 }
 
-func (f *plusSuperUnboundField) evaluate(i *interpreter, sb selfBinding, origBinding bindingFrame, fieldName string) (value, error) {
+func (f *plusSuperUnboundField) evaluate(i *interpreter, sb selfBinding, origBinding bindingFrame, fieldName string, isDeferred bool) (value, error) {
 	err := i.newCall(environment{}, false)
 	if err != nil {
 		return nil, err
@@ -145,7 +146,7 @@ func (f *plusSuperUnboundField) evaluate(i *interpreter, sb selfBinding, origBin
 	})
 	defer i.stack.clearCurrentTrace()
 
-	right, err := f.inner.evaluate(i, sb, origBinding, fieldName)
+	right, err := f.inner.evaluate(i, sb, origBinding, fieldName, isDeferred)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +155,7 @@ func (f *plusSuperUnboundField) evaluate(i *interpreter, sb selfBinding, origBin
 		return right, nil
 	}
 
-	left, err := objectIndex(i, sb.super(), fieldName)
+	left, err := objectIndex(i, sb.super(), fieldName, isDeferred)
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +227,7 @@ func (closure *closure) evalCall(arguments callArguments, i *interpreter) (value
 		addBindings(closure.env.upValues, argThunks),
 		closure.env.selfBinding,
 	)
-	return i.EvalInCleanEnv(&calledEnvironment, closure.function.Body, arguments.tailstrict)
+	return i.EvalInCleanEnv(&calledEnvironment, closure.function.Body, arguments.tailstrict, false)
 }
 
 func (closure *closure) parameters() []namedParameter {
@@ -287,7 +288,7 @@ func (native *NativeFunction) evalCall(arguments callArguments, i *interpreter) 
 	if err != nil {
 		return nil, i.Error(err.Error())
 	}
-	return jsonToValue(i, resultJSON)
+	return jsonToValue(i, resultJSON, false)
 }
 
 // Parameters returns a NativeFunction's parameters.

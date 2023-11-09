@@ -152,7 +152,7 @@ func (cache *importCache) importString(importedFrom, importedPath string, i *int
 	if err != nil {
 		return nil, i.Error(err.Error())
 	}
-	return makeValueString(data.String()), nil
+	return makeValueString(data.String(), false), nil
 }
 
 // ImportString imports an array of bytes, caches it and then returns it.
@@ -164,9 +164,9 @@ func (cache *importCache) importBinary(importedFrom, importedPath string, i *int
 	bytes := data.Data()
 	elements := make([]*cachedThunk, len(bytes))
 	for i := range bytes {
-		elements[i] = readyThunk(intToValue(int(bytes[i])))
+		elements[i] = readyThunk(intToValue(int(bytes[i]), false))
 	}
-	return makeValueArray(elements), nil
+	return makeValueArray(elements, false), nil
 }
 
 func nodeToPV(i *interpreter, filename string, node ast.Node) *cachedThunk {
