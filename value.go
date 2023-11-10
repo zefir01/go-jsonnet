@@ -555,10 +555,11 @@ type objectLocal struct {
 // Let a = {x: 42} and b = {y: self.x}. Evaluating b.y is an error,
 // but (a+b).y evaluates to 42.
 type simpleObject struct {
-	upValues bindingFrame
-	fields   simpleObjectFieldMap
-	asserts  []unboundField
-	locals   []objectLocal
+	upValues       bindingFrame
+	fields         simpleObjectFieldMap
+	asserts        []unboundField
+	locals         []objectLocal
+	deferredFields map[string]struct{}
 }
 
 func checkAssertionsHelper(i *interpreter, obj *valueObject, curr uncachedObject, superDepth int) error {
@@ -606,14 +607,15 @@ func (*simpleObject) inheritanceSize() int {
 	return 1
 }
 
-func makeValueSimpleObject(b bindingFrame, fields simpleObjectFieldMap, asserts []unboundField, locals []objectLocal, isDeferred bool) *valueObject {
+func makeValueSimpleObject(b bindingFrame, fields simpleObjectFieldMap, asserts []unboundField, locals []objectLocal, isDeferred bool, deferredFields map[string]struct{}) *valueObject {
 	return &valueObject{
 		cache: make(map[objectCacheKey]value),
 		uncached: &simpleObject{
-			upValues: b,
-			fields:   fields,
-			asserts:  asserts,
-			locals:   locals,
+			upValues:       b,
+			fields:         fields,
+			asserts:        asserts,
+			locals:         locals,
+			deferredFields: deferredFields,
 		},
 		valueBase: valueBase{isDeferred: isDeferred},
 	}
@@ -727,6 +729,10 @@ func objectIndex(i *interpreter, sb selfBinding, fieldName string, isDeferred bo
 		return nil, i.Error("Attempt to use super when there is no super class.")
 	}
 
+	if fieldName == "f4" {
+		fmt.Println("")
+	}
+
 	found, field, upValues, locals, foundAt := findField(sb.self.uncached, sb.superDepth, fieldName)
 	if !found {
 		found, field, upValues, locals, foundAt := findField(sb.self.uncached, sb.superDepth, "_schema")
@@ -789,6 +795,24 @@ func uncachedObjectFieldsVisibility(obj uncachedObject) fieldHideMap {
 		for fieldName, field := range obj.fields {
 			r[fieldName] = field.hide
 		}
+	}
+	return r
+}
+
+func objectFieldsDeferred(obj uncachedObject) map[string]struct{} {
+	r := map[string]struct{}{}
+	switch obj := obj.(type) {
+	case *extendedObject:
+		r = objectFieldsDeferred(obj.left)
+		rightMap := objectFieldsDeferred(obj.right)
+		for k, _ := range rightMap {
+			r[k] = struct{}{}
+		}
+
+		return r
+
+	case *simpleObject:
+		return obj.deferredFields
 	}
 	return r
 }

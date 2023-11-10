@@ -1,10 +1,13 @@
 local a={
-  _schema:: {
-    f2: 'testVal'
-  }
+    _schema::{
+        f4: {
+            test44: 444
+        }
+    }
 };
-local b=[a.f2];
+
+local b=[a.f1, 'hhh'];
 
 {
-  test2: b
+  t4: a.f4.test44
 }

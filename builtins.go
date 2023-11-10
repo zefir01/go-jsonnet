@@ -228,7 +228,6 @@ func builtinLength(i *interpreter, x value) (value, error) {
 		deferred = x.isDeferred
 		num = len(objectFields(x, withoutHidden))
 	case *valueArray:
-		deferred = x.isDeferred
 		num = len(x.elements)
 	case valueString:
 		deferred = isDeferred(x)
@@ -1418,6 +1417,7 @@ func builtinUglyObjectFlatMerge(i *interpreter, x value) (value, error) {
 		[]unboundField{}, // No asserts allowed
 		nil,
 		i.isDeferred(x),
+		map[string]struct{}{},
 	), nil
 }
 

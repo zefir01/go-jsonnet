@@ -389,10 +389,12 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus, isDeferred bool) (
 		return i.evaluate(node.BranchFalse, tc, isDeferred)
 
 	case *ast.DesugaredObject:
+		deferredField := false
 		// Evaluate all the field names.  Check for null, dups, etc.
 		fields := make(simpleObjectFieldMap, len(node.Fields))
+		var deferredFields = map[string]struct{}{}
 		for _, field := range node.Fields {
-			fieldNameValue, err := i.evaluate(field.Name, nonTailCall, isDeferred)
+			fieldNameValue, err := i.evaluate(field.Name, nonTailCall, false)
 			if err != nil {
 				return nil, err
 			}
@@ -405,6 +407,11 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus, isDeferred bool) (
 				continue
 			default:
 				return nil, i.Error(fmt.Sprintf("Field name must be string, got %v", fieldNameValue.getType().name))
+			}
+			if i.isDeferred(fieldNameValue) {
+				deferredField = true
+				deferredFields[fieldName] = struct{}{}
+				continue
 			}
 
 			if _, ok := fields[fieldName]; ok {
@@ -425,7 +432,7 @@ func (i *interpreter) evaluate(a ast.Node, tc tailCallStatus, isDeferred bool) (
 			locals = append(locals, objectLocal{name: local.Variable, node: local.Body})
 		}
 		upValues := i.stack.capture(node.FreeVariables())
-		return makeValueSimpleObject(upValues, fields, asserts, locals, isDeferred), nil
+		return makeValueSimpleObject(upValues, fields, asserts, locals, isDeferred || deferredField, deferredFields), nil
 
 	case *ast.Error:
 		msgVal, err := i.evaluate(node.Expr, nonTailCall, isDeferred)
@@ -754,7 +761,7 @@ func (i *interpreter) manifestJSON(v value) (*manifested, error) {
 		}
 		i.stack.clearCurrentTrace()
 
-		result := make(map[string]interface{}, len(fieldNames))
+		result := make(map[manifested]interface{}, len(fieldNames))
 
 		for _, fieldName := range fieldNames {
 			msg := ast.MakeLocationRangeMessage(fmt.Sprintf("Field %#v", fieldName))
@@ -772,12 +779,26 @@ func (i *interpreter) manifestJSON(v value) (*manifested, error) {
 				i.stack.clearCurrentTrace()
 				return nil, err
 			}
-			result[fieldName] = field
+			m := manifested{
+				isDeferred: false,
+				value:      fieldName,
+				isNull:     false,
+			}
+			result[m] = field
 			i.stack.clearCurrentTrace()
 
 			if i.isDeferred(fieldVal) {
 				v.isDeferred = true
 			}
+		}
+
+		for k, _ := range objectFieldsDeferred(v.uncached) {
+			m := manifested{
+				isDeferred: true,
+				value:      k,
+				isNull:     false,
+			}
+			result[m] = nil
 		}
 
 		return &manifested{isDeferred: v.isDeferred, value: result}, nil
@@ -804,6 +825,7 @@ func serializeJSON(v *manifested, multiline bool, indent string, buf *bytes.Buff
 		} else {
 			buf.WriteString("null")
 		}
+		return
 	}
 	switch vv := v.value.(type) {
 	case []interface{}:
@@ -866,12 +888,15 @@ func serializeJSON(v *manifested, multiline bool, indent string, buf *bytes.Buff
 		}
 		buf.WriteString(val)
 
-	case map[string]interface{}:
-		fieldNames := make([]string, 0, len(vv))
+	case map[manifested]interface{}:
+		fieldNames := make([]manifested, 0, len(vv))
 		for name := range vv {
 			fieldNames = append(fieldNames, name)
 		}
-		sort.Strings(fieldNames)
+
+		sort.Slice(fieldNames, func(i, j int) bool {
+			return fieldNames[i].value.(string) < fieldNames[j].value.(string)
+		})
 
 		if len(fieldNames) == 0 {
 			if v.isDeferred {
@@ -898,10 +923,18 @@ func serializeJSON(v *manifested, multiline bool, indent string, buf *bytes.Buff
 				buf.WriteString(prefix)
 				buf.WriteString(indent2)
 
-				buf.WriteString(unparseString(fieldName))
+				if fieldName.isDeferred {
+					buf.WriteString(deferredColor(unparseString(fieldName.value.(string))))
+				} else {
+					buf.WriteString(unparseString(fieldName.value.(string)))
+				}
 				buf.WriteString(": ")
 
-				serializeJSON(fieldVal.(*manifested), multiline, indent2, buf)
+				if fieldVal == nil {
+					serializeJSON(&manifested{isDeferred: false, isNull: true}, multiline, indent2, buf)
+				} else {
+					serializeJSON(fieldVal.(*manifested), multiline, indent2, buf)
+				}
 
 				if multiline {
 					prefix = ",\n"
@@ -1343,7 +1376,7 @@ func buildObject(hide ast.ObjectFieldHide, fields map[string]value) *valueObject
 	for name, v := range fields {
 		fieldMap[name] = simpleObjectField{&readyValue{v}, hide}
 	}
-	return makeValueSimpleObject(bindingFrame{}, fieldMap, nil, nil, false)
+	return makeValueSimpleObject(bindingFrame{}, fieldMap, nil, nil, false, map[string]struct{}{})
 }
 
 func buildInterpreter(ext vmExtMap, nativeFuncs map[string]*NativeFunction, maxStack int, ic *importCache, traceOut io.Writer) (*interpreter, error) {
@@ -1367,16 +1400,16 @@ func buildInterpreter(ext vmExtMap, nativeFuncs map[string]*NativeFunction, maxS
 }
 
 func makeInitialEnv(filename string, baseStd *valueObject) environment {
-	//fileSpecific := buildObject(ast.ObjectFieldHidden, map[string]value{
-	//	"thisFile": makeValueString(filename, false),
-	//})
+	fileSpecific := buildObject(ast.ObjectFieldHidden, map[string]value{
+		"thisFile": makeValueString(filename, false),
+	})
 
-	//stdThunk := readyThunk(makeValueExtendedObject(baseStd, fileSpecific))
+	stdThunk := readyThunk(makeValueExtendedObject(baseStd, fileSpecific))
 
 	return makeEnvironment(
 		bindingFrame{
-			//"std":  stdThunk,
-			//"$std": stdThunk, // Unavailable to the user. To be used with desugaring.
+			"std":  stdThunk,
+			"$std": stdThunk, // Unavailable to the user. To be used with desugaring.
 		},
 		makeUnboundSelfBinding(),
 	)
