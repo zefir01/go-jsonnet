@@ -61,6 +61,8 @@ type potentialValue interface {
 	getValue(i *interpreter) (value, error)
 
 	aPotentialValue()
+	isDeferred() bool
+	isSchema() bool
 }
 
 // A set of variables with associated thunks.
@@ -293,10 +295,14 @@ func (*valueNull) getType() *valueType {
 type valueArray struct {
 	valueBase
 	elements []*cachedThunk
+	isSchema bool
 }
 
 func (arr *valueArray) index(i *interpreter, index int) (value, error) {
 	if 0 <= index && index < arr.length() {
+		if arr.isSchema {
+			arr.elements[index].schema = true
+		}
 		return i.evaluatePV(arr.elements[index])
 	}
 	return nil, i.Error(fmt.Sprintf("Index %d out of bounds, not within [0, %v)", index, arr.length()))
@@ -317,8 +323,8 @@ func makeValueArray(elements []*cachedThunk, isDeferred bool) *valueArray {
 		copy(arrayElems, elements)
 	}
 	for _, v := range elements {
-		if v.isDeferred {
-			isDeferred = v.isDeferred
+		if v.deferred {
+			isDeferred = v.deferred
 		}
 	}
 	return &valueArray{
@@ -440,6 +446,7 @@ type valueObject struct {
 	assertionError error
 	cache          map[objectCacheKey]value
 	uncached       uncachedObject
+	isSchema       bool
 }
 
 // Hack - we need to distinguish not-checked-yet and no error situations
@@ -506,10 +513,38 @@ func (*valueObject) getType() *valueType {
 }
 
 func (obj *valueObject) index(i *interpreter, field string) (value, error) {
-	return objectIndex(i, objectBinding(obj), field, false)
+	val, err := objectIndex(i, objectBinding(obj), field, obj.isSchema)
+	if err != nil {
+		return nil, err
+	}
+	switch v := val.(type) {
+	case *valueObject:
+		if obj.isSchema {
+			v.isSchema = obj.isSchema
+		}
+	case *valueArray:
+		if obj.isSchema {
+			v.isSchema = obj.isSchema
+		}
+	}
+	return val, nil
 }
 func (obj *valueObject) indexDeferred(i *interpreter, field string) (value, error) {
-	return objectIndex(i, objectBinding(obj), field, true)
+	val, err := objectIndex(i, objectBinding(obj), field, true)
+	if err != nil {
+		return nil, err
+	}
+	switch v := val.(type) {
+	case *valueObject:
+		if obj.isSchema {
+			v.isSchema = obj.isSchema
+		}
+	case *valueArray:
+		if obj.isSchema {
+			v.isSchema = obj.isSchema
+		}
+	}
+	return val, nil
 }
 
 func (obj *valueObject) assertionsChecked() bool {
@@ -578,7 +613,7 @@ func checkAssertionsHelper(i *interpreter, obj *valueObject, curr uncachedObject
 		for _, assert := range curr.asserts {
 			sb := selfBinding{self: obj, superDepth: superDepth}
 			fieldUpValues := prepareFieldUpvalues(sb, curr.upValues, curr.locals)
-			_, err := assert.evaluate(i, sb, fieldUpValues, "", false)
+			_, err := assert.evaluate(i, sb, fieldUpValues, "", false, false)
 			if err != nil {
 				return err
 			}
@@ -607,7 +642,7 @@ func (*simpleObject) inheritanceSize() int {
 	return 1
 }
 
-func makeValueSimpleObject(b bindingFrame, fields simpleObjectFieldMap, asserts []unboundField, locals []objectLocal, isDeferred bool, deferredFields map[string]struct{}) *valueObject {
+func makeValueSimpleObject(b bindingFrame, fields simpleObjectFieldMap, asserts []unboundField, locals []objectLocal, isDeferred bool, deferredFields map[string]struct{}, schema bool) *valueObject {
 	return &valueObject{
 		cache: make(map[objectCacheKey]value),
 		uncached: &simpleObject{
@@ -618,6 +653,7 @@ func makeValueSimpleObject(b bindingFrame, fields simpleObjectFieldMap, asserts 
 			deferredFields: deferredFields,
 		},
 		valueBase: valueBase{isDeferred: isDeferred},
+		isSchema:  schema,
 	}
 }
 
@@ -630,7 +666,7 @@ type simpleObjectField struct {
 
 // unboundField is a field that doesn't know yet in which object it is.
 type unboundField interface {
-	evaluate(i *interpreter, sb selfBinding, origBinding bindingFrame, fieldName string, isDeferred bool) (value, error)
+	evaluate(i *interpreter, sb selfBinding, origBinding bindingFrame, fieldName string, isDeferred bool, schema bool) (value, error)
 	loc() *ast.LocationRange
 }
 
@@ -732,6 +768,7 @@ func objectIndex(i *interpreter, sb selfBinding, fieldName string, isDeferred bo
 	if fieldName == "f4" {
 		fmt.Println("")
 	}
+	schema := false
 
 	found, field, upValues, locals, foundAt := findField(sb.self.uncached, sb.superDepth, fieldName)
 	if !found {
@@ -739,9 +776,17 @@ func objectIndex(i *interpreter, sb selfBinding, fieldName string, isDeferred bo
 		if found {
 			fieldSelfBinding := selfBinding{self: sb.self, superDepth: foundAt}
 			fieldUpValues := prepareFieldUpvalues(fieldSelfBinding, upValues, locals)
-			val, err := field.field.evaluate(i, fieldSelfBinding, fieldUpValues, "_schema", true)
+			val, err := field.field.evaluate(i, fieldSelfBinding, fieldUpValues, "_schema", true, true)
 			o := val.(*valueObject)
 			val, err = o.indexDeferred(i, fieldName)
+			switch s := val.(type) {
+			case *valueObject:
+				s.isSchema = true
+				schema = true
+			case *valueArray:
+				s.isSchema = true
+				schema = true
+			}
 			return val, err
 		}
 
@@ -755,7 +800,7 @@ func objectIndex(i *interpreter, sb selfBinding, fieldName string, isDeferred bo
 	fieldSelfBinding := selfBinding{self: sb.self, superDepth: foundAt}
 	fieldUpValues := prepareFieldUpvalues(fieldSelfBinding, upValues, locals)
 
-	val, err := field.field.evaluate(i, fieldSelfBinding, fieldUpValues, fieldName, isDeferred)
+	val, err := field.field.evaluate(i, fieldSelfBinding, fieldUpValues, fieldName, isDeferred, schema)
 
 	if err == nil {
 		sb.self.cache[objectCacheKey{field: fieldName, depth: foundAt}] = val

@@ -1418,6 +1418,7 @@ func builtinUglyObjectFlatMerge(i *interpreter, x value) (value, error) {
 		nil,
 		i.isDeferred(x),
 		map[string]struct{}{},
+		objarr.isSchema,
 	), nil
 }
 
