@@ -1,6 +1,9 @@
 local a={
     _schema::{
-        f4: ['aaa', {vv: 1}]
+        f4: ['aaa', {vv: 1}],
+        f5: {
+            f1: 'bbb'
+        }
     }
 };
 
@@ -15,4 +18,6 @@ local b= {
 {
   t1: b,
   s: std.isDeferred(b),
+  ss: a.f5.f1,
+  sss: std.isDeferred(a.f5.f1),
 }

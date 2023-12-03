@@ -225,9 +225,10 @@ func builtinLength(i *interpreter, x value) (value, error) {
 	var deferred bool
 	switch x := x.(type) {
 	case *valueObject:
-		deferred = x.isDeferred
+		deferred = len(objectFieldsDeferred(x.uncached)) > 0
 		num = len(objectFields(x, withoutHidden))
 	case *valueArray:
+		deferred = x.isDeferred
 		num = len(x.elements)
 	case valueString:
 		deferred = isDeferred(x)
