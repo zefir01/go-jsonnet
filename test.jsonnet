@@ -1,19 +1,10 @@
 local a={
     _schema::{
-        f4: {
-            test44: 444,
-            test55: [
-                {
-                    aa: {
-                        bbb: 'aaa'
-                    }
-                }
-            ]
-        }
+        f4: ['aaa']
     }
 };
 
 
 {
-  t4: a.f4.test55[0].aa.bbb,
+  t4: std.jsonToString('aaa')
 }

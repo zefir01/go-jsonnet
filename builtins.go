@@ -1416,7 +1416,6 @@ func builtinUglyObjectFlatMerge(i *interpreter, x value) (value, error) {
 		newFields,
 		[]unboundField{}, // No asserts allowed
 		nil,
-		i.isDeferred(x),
 		map[string]struct{}{},
 		objarr.isSchema,
 	), nil

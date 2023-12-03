@@ -32,3 +32,4 @@ gojsonnet.egg-info/
 /builtin-benchmark-results
 
 libjsonnet.wasm
+.idea
