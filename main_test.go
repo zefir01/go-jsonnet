@@ -76,11 +76,44 @@ type mainTest struct {
 	meta   *testMetadata
 }
 
+func manifestedToNative(value interface{}) interface{} {
+	switch val := value.(type) {
+	case *manifested:
+		if val.isNull {
+			return nil
+		}
+		return manifestedToNative(val.value)
+	case map[manifested]interface{}:
+		var res = make(map[string]interface{})
+		for k, v := range val {
+			res[k.value.(string)] = manifestedToNative(v)
+		}
+		return res
+	case []manifested:
+		res := make([]interface{}, len(val))
+		for i, v := range val {
+			res[i] = manifestedToNative(v)
+		}
+		return res
+	default:
+		return value
+	}
+}
+
 var jsonToString = &NativeFunction{
 	Name:   "jsonToString",
 	Params: ast.Identifiers{"x"},
 	Func: func(x []interface{}) (interface{}, error) {
-		bytes, err := json.Marshal(x[0])
+		var bytes []byte
+		var err error
+		switch v := x[0].(type) {
+		case *manifested:
+			if v.isNull {
+				bytes, err = json.Marshal(nil)
+			} else {
+				bytes, err = json.Marshal(manifestedToNative(v.value))
+			}
+		}
 		if err != nil {
 			return nil, err
 		}

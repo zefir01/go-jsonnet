@@ -1,10 +1,13 @@
-local a={
-    _schema::{
-        f4: ['aaa']
-    }
-};
-
-
 {
-  t4: std.jsonToString('aaa')
+  "foo.json": {
+    baz: 3,
+    baq: "27",
+  },
+  "bar.json": {
+    foo: {
+      bar: {
+        baz: "yes",
+      },
+    },
+  },
 }

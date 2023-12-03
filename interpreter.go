@@ -992,22 +992,29 @@ func (i *interpreter) manifestAndSerializeMulti(v value, stringOutputMode bool) 
 		return r, err
 	}
 	switch json := json.value.(type) {
-	case map[string]interface{}:
+	case map[manifested]interface{}:
 		for filename, fileJSON := range json {
 			if stringOutputMode {
 				switch val := fileJSON.(type) {
-				case string:
-					r[filename] = val
+				case *manifested:
+					switch str := val.value.(type) {
+					case string:
+						r[filename.value.(string)] = str
+					default:
+						msg := fmt.Sprintf("multi mode: top-level object's key %s has a value of type %T, "+
+							"should be a string", filename.value, val)
+						return r, makeRuntimeError(msg, i.getCurrentStackTrace())
+					}
 				default:
 					msg := fmt.Sprintf("multi mode: top-level object's key %s has a value of type %T, "+
-						"should be a string", filename, val)
+						"should be a string", filename.value, val)
 					return r, makeRuntimeError(msg, i.getCurrentStackTrace())
 				}
 			} else {
 				var buf bytes.Buffer
 				serializeJSON(fileJSON.(*manifested), true, "", &buf)
 				buf.WriteString("\n")
-				r[filename] = buf.String()
+				r[filename.value.(string)] = buf.String()
 			}
 		}
 	default:
