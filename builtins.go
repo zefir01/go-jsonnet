@@ -2224,6 +2224,25 @@ func builtinParseInt(i *interpreter, x value) (value, error) {
 	return makeValueNumber(float64(res), i.isDeferred(x)), nil
 }
 
+func builtinIsDeferred(i *interpreter, x value) (value, error) {
+	switch x.(type) {
+	case *valueObject:
+		j, err := i.manifestJSON(x)
+		if err != nil {
+			return nil, err
+		}
+		return makeValueBoolean(j.isDeferred, false), nil
+	case *valueArray:
+		j, err := i.manifestJSON(x)
+		if err != nil {
+			return nil, err
+		}
+		return makeValueBoolean(j.isDeferred, false), nil
+	default:
+		return makeValueBoolean(i.isDeferred(x), false), nil
+	}
+}
+
 var funcBuiltins = buildBuiltinMap([]builtin{
 	builtinID,
 	&unaryBuiltin{name: "extVar", function: builtinExtVar, params: ast.Identifiers{"x"}},
@@ -2290,4 +2309,7 @@ var funcBuiltins = buildBuiltinMap([]builtin{
 
 	// internal
 	&unaryBuiltin{name: "$objectFlatMerge", function: builtinUglyObjectFlatMerge, params: ast.Identifiers{"x"}},
+
+	//deferred
+	&unaryBuiltin{name: "isDeferred", function: builtinIsDeferred, params: ast.Identifiers{"x"}},
 })
